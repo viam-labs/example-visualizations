@@ -44,10 +44,10 @@ def test_reconfigure_static_items_have_distinct_types():
     assert types == {"box", "sphere", "capsule"}
 
 
-def test_tick_returns_events_for_moving_box():
+def test_scene_tick_returns_events_for_moving_box():
     s = _bare_service()
     s.reconfigure(_stub_config(), {})
-    events = list(s.tick(s.scene, 0.5))
+    events = list(s.scene_tick(s.scene, 0.5))
     # Should produce at least one event (pose + dims change vs.
     # initial state).
     assert len(events) >= 1
@@ -55,10 +55,10 @@ def test_tick_returns_events_for_moving_box():
     assert events[0].kind == "updated"
 
 
-def test_tick_emits_pose_and_dim_paths():
+def test_scene_tick_emits_pose_and_dim_paths():
     s = _bare_service()
     s.reconfigure(_stub_config(), {})
-    events = list(s.tick(s.scene, 0.5))
+    events = list(s.scene_tick(s.scene, 0.5))
     paths = events[0].paths
     # Pose should have changed: at least one pose path emitted.
     assert any(p.startswith("poseInObserverFrame.pose") for p in paths)
@@ -66,18 +66,14 @@ def test_tick_emits_pose_and_dim_paths():
     assert any("dimsMm" in p for p in paths)
 
 
-def test_tick_at_t_zero_no_pose_change_emits_no_pose_path():
+def test_scene_tick_at_t_zero_still_emits_for_color_change():
     # At t=0, the orbital position and scale formulas equal the
-    # initial pose / dims (x=400, y=0, scale=80). Color and opacity
-    # do change, but those go through the metadata-only-update
-    # respawn path (which scene.update reports as paths=[]).
+    # initial pose / dims. But color changes from (255,100,0) →
+    # hsv(0,1,1) = (255,0,0), so there's always at least a
+    # metadata-only event (paths=[] → library respawn intercept).
     s = _bare_service()
     s.reconfigure(_stub_config(), {})
-    events = list(s.tick(s.scene, 0.0))
-    # The single update for moving_box may have paths=[] (metadata-
-    # only) or pose+dims paths depending on the precise t=0 evaluation
-    # of the sine. Color changes from (255,100,0) → hsv(0,1,1) =
-    # (255,0,0), so there's always at least a color change.
+    events = list(s.scene_tick(s.scene, 0.0))
     assert len(events) == 1
     assert events[0].label == "moving_box"
 

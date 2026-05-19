@@ -223,16 +223,20 @@ class SceneServiceBase(WorldStateStore):
             f"{type(self).__name__} must override read_asset()"
         )
 
-    def tick(self, scene: Scene, t: float) -> Sequence[SceneEvent]:
+    def scene_tick(self, scene: Scene, t: float) -> Sequence[SceneEvent]:
         """Per-tick animation hook (recommended API).
 
-        Override to mutate typed Visual / Composite objects in ``scene``
-        and return the diff events from :meth:`Scene.update`. The
-        library broadcasts the events to subscribers and handles the
-        renderer's quirks (notably: empty-paths UPDATED events
-        produced by ``metadata.*``-only changes are translated to
-        REMOVE + re-ADD with a fresh UUID so the renderer actually
-        paints color / opacity changes).
+        Called by the library's tick loop at ``tick_hz`` (default
+        30 Hz). Override to mutate typed Visual / Composite objects
+        in ``scene`` and return the diff events from
+        :meth:`Scene.update`. The library broadcasts the returned
+        events to subscribers and handles the renderer's quirks
+        (notably: empty-paths UPDATED events produced by
+        ``metadata.*``-only changes are translated to REMOVE +
+        re-ADD with a fresh UUID so the renderer actually paints
+        color / opacity changes).
+
+        ``t`` is elapsed seconds since the last reconfigure.
 
         Example::
 
@@ -244,7 +248,7 @@ class SceneServiceBase(WorldStateStore):
                 )
                 self.set_scene(self.my_box)
 
-            def tick(self, scene, t):
+            def scene_tick(self, scene, t):
                 self.my_box.pose = viz.Pose.at(
                     x=100 * math.cos(2 * math.pi * t / 4),
                     y=100 * math.sin(2 * math.pi * t / 4),
@@ -277,8 +281,8 @@ class SceneServiceBase(WorldStateStore):
         ``(pose_dict, geom_override_dict, field_mask_paths, metadata_override)``.
 
         .. deprecated::
-            Use :meth:`tick` (scene-centric) instead. The new API
-            mutates typed Visual objects directly, avoiding the
+            Use :meth:`scene_tick` (scene-centric) instead. The new
+            API mutates typed Visual objects directly, avoiding the
             tuple-return shape and field-mask-path bookkeeping.
 
         The default implementation is "no animation" — returns the
@@ -292,8 +296,8 @@ class SceneServiceBase(WorldStateStore):
         ``item.animation.mode`` and returns False for ``"none"`` or
         absent.
 
-        Not consulted under the new :meth:`tick` (scene-centric)
-        path — that path runs every tick and emits no events if
+        Not consulted under the new :meth:`scene_tick` path — that
+        path runs every tick and emits no events if
         ``scene.update(...)`` returns nothing.
         """
         anim = item.get("animation") or {}
@@ -301,8 +305,8 @@ class SceneServiceBase(WorldStateStore):
         return mode != "" and mode != "none"
 
     def _has_scene_tick(self) -> bool:
-        """True if the subclass overrode :meth:`tick`."""
-        return type(self).tick is not SceneServiceBase.tick
+        """True if the subclass overrode :meth:`scene_tick`."""
+        return type(self).scene_tick is not SceneServiceBase.scene_tick
 
     # ------------------------------------------------------------------
     # Optional hooks
@@ -676,16 +680,16 @@ class SceneServiceBase(WorldStateStore):
         t = time.monotonic() - self._animation_t0
 
         # Scene-centric tick path: if the subclass overrides
-        # ``tick(scene, t)``, call it and apply the returned events
-        # through the same machinery ``apply_events`` uses. Subclass
-        # gets the typed Scene API; the library handles wire format,
-        # subscriber broadcasts, and the metadata-only-respawn
-        # intercept.
+        # ``scene_tick(scene, t)``, call it and apply the returned
+        # events through the same machinery ``apply_events`` uses.
+        # Subclass gets the typed Scene API; the library handles
+        # wire format, subscriber broadcasts, and the metadata-only-
+        # respawn intercept.
         if self._has_scene_tick():
             try:
-                events = list(self.tick(self.scene, t) or [])
+                events = list(self.scene_tick(self.scene, t) or [])
             except Exception as e:
-                LOGGER.warning(f"tick(scene, t) failed: {type(e).__name__}: {e}")
+                LOGGER.warning(f"scene_tick failed: {type(e).__name__}: {e}")
                 events = []
             if events:
                 wire_events = events_to_wire(events)

@@ -34,12 +34,12 @@ What this file shows
 3. Building a scene from typed :class:`viam_visuals.Box` /
    ``.Sphere`` / ``.Capsule`` values, with :meth:`set_scene` to
    install them.
-4. The :meth:`tick` hook: mutate typed objects in place, return
-   ``scene.update(...)`` events. The library diffs against the
-   committed snapshot, emits the right field-mask paths, and
+4. The :meth:`scene_tick` hook: mutate typed objects in place,
+   return ``scene.update(...)`` events. The library diffs against
+   the committed snapshot, emits the right field-mask paths, and
    broadcasts to subscribers.
 
-The :meth:`tick` method below drives a moving box through four
+The :meth:`scene_tick` method below drives a moving box through four
 animations simultaneously: orbital position, sinusoidal scale,
 HSV-rainbow color, and pulsing opacity. All four are expressed as
 direct mutations on a typed Box object.
@@ -86,8 +86,9 @@ class SimpleSceneExample(viz.SceneServiceBase):
     def __init__(self, name: str) -> None:
         super().__init__(name)
         # The moving box: a typed Box object whose fields we mutate
-        # on every tick. set_scene() installs it in self.scene; tick()
-        # mutates it; scene.update(self.moving_box) emits the diff.
+        # on every tick. set_scene() installs it in self.scene;
+        # scene_tick() mutates it; scene.update(self.moving_box)
+        # emits the diff.
         self.moving_box: viz.Box = viz.Box(
             label="moving_box",
             pose=viz.Pose.at(x=400, y=0, z=200),
@@ -158,9 +159,12 @@ class SimpleSceneExample(viz.SceneServiceBase):
         primitive types."""
         return viz.build_basic_geometry(item, override_geom)
 
-    def tick(self, scene: viz.Scene, t: float) -> Sequence[viz.SceneEvent]:
+    def scene_tick(self, scene: viz.Scene, t: float) -> Sequence[viz.SceneEvent]:
         """Per-tick state for animated items: mutate typed objects
         in place, return the diff via ``scene.update(...)``.
+
+        Called by the library's tick loop at ``tick_hz`` (default
+        30 Hz). ``t`` is elapsed seconds since reconfigure.
 
         The moving box does four animations simultaneously:
 
