@@ -211,11 +211,13 @@ class SimpleSceneExample(viz.SceneServiceBase):
             Same library-side translation as color.
         """
         # --- Moving box: four animations on one Visual --------------
-        # Position: orbit around the box's anchor at (400, 0, 200).
-        self.moving_box.pose = viz.Pose.at(
-            x=400 + 150 * math.cos(2 * math.pi * t / 4),
-            y=0 + 150 * math.sin(2 * math.pi * t / 4),
-            z=200,
+        # Position: orbit around (400, 0, 200) at radius 150 mm,
+        # period 4 s — using the viz.orbit_pose helper.
+        self.moving_box.pose = viz.orbit_pose(
+            base=viz.Pose.at(x=400, y=0, z=200),
+            period_s=4.0,
+            radius_mm=150.0,
+            t=t,
         )
         # Scale: pulse all three dimensions symmetrically.
         scale = 80 + 80 * (1 + math.sin(2 * math.pi * t / 2)) / 2

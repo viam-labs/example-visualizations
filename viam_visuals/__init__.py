@@ -56,6 +56,7 @@ from .composites import (
     Line,
     TrajectoryPlan,
 )
+from .anim_helpers import orbit_pose, oscillate_pose, spin_pose, swing_pose
 from .pose import Pose, PoseLike, lerp_pose, normalize_pose
 from .shapes import (
     Arrow,
@@ -114,6 +115,10 @@ __all__ = [
     "Pose",
     "PoseLike",
     "lerp_pose",
+    "orbit_pose",
+    "oscillate_pose",
+    "spin_pose",
+    "swing_pose",
     "ColorLike",
     "AnimationLike",
     "hsv_to_rgb",
