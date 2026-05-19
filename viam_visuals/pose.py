@@ -101,6 +101,19 @@ def lerp_pose(a: PoseLike, b: PoseLike, t: float) -> Pose:
     poses from a planner output, interpolate the runner's pose at
     each tick, and the orientation visibly rotates between
     waypoints with no axis flips.
+
+    Example — runner walking a CBiRRT plan with smooth orientation::
+
+        plan = await motion.plan(...)           # CBiRRT planner output
+        waypoints = [Pose.at(...), ...]         # after forward-kinematics
+        # ...
+        def tick(self, scene, t):
+            seg = int((t / 12) * (len(waypoints) - 1))
+            local = (t / 12 * (len(waypoints) - 1)) - seg
+            self.runner.pose = lerp_pose(
+                waypoints[seg], waypoints[seg + 1], local,
+            )
+            return scene.update(self.runner)
     """
     pa = a if isinstance(a, Pose) else _from_like(a)
     pb = b if isinstance(b, Pose) else _from_like(b)

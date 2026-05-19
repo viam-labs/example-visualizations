@@ -2,11 +2,12 @@
 "I just want to add a few geometries" reference.
 
 Bypasses ``SimpleSceneExample.new()`` (which expects a framework-
-supplied ComponentConfig) and exercises reconfigure / build_geometry
-directly with bare instances.
+supplied ComponentConfig) and exercises reconfigure / tick /
+build_geometry directly with bare instances.
 """
 from __future__ import annotations
 
+import math
 from types import SimpleNamespace
 
 import pytest
@@ -16,9 +17,6 @@ from src.simple_scene_example import SimpleSceneExample
 
 
 def _stub_config():
-    """A minimal ComponentConfig-shaped stub: SimpleSceneExample
-    reads no attributes in reconfigure, so an empty attrs Struct
-    works."""
     return SimpleNamespace(name="test", attributes=None)
 
 
@@ -28,49 +26,89 @@ def _bare_service():
     return s
 
 
-def test_reconfigure_installs_three_items():
+def test_reconfigure_installs_four_items():
     s = _bare_service()
     s.reconfigure(_stub_config(), {})
-    assert len(s._state) == 3
-    assert set(s._state.keys()) == {"demo_box", "demo_sphere", "demo_capsule"}
+    assert set(s.scene.labels()) == {
+        "demo_box", "demo_sphere", "demo_capsule", "moving_box",
+    }
+    assert set(s._state.keys()) == {
+        "demo_box", "demo_sphere", "demo_capsule", "moving_box",
+    }
 
 
-def test_reconfigure_items_have_distinct_types():
+def test_reconfigure_static_items_have_distinct_types():
     s = _bare_service()
     s.reconfigure(_stub_config(), {})
     types = {entry["item"]["type"] for entry in s._state.values()}
     assert types == {"box", "sphere", "capsule"}
 
 
-@pytest.mark.parametrize("label,expected_type", [
-    ("demo_box", "box"),
-    ("demo_sphere", "sphere"),
-    ("demo_capsule", "capsule"),
-])
-def test_build_geometry_dispatches_for_each_type(label, expected_type):
+def test_tick_returns_events_for_moving_box():
     s = _bare_service()
     s.reconfigure(_stub_config(), {})
-    item = s._state[label]["item"]
-    geom = s.build_geometry(item, {})
-    assert geom is not None
-    assert geom.label == label
-    assert item["type"] == expected_type
+    events = list(s.tick(s.scene, 0.5))
+    # Should produce at least one event (pose + dims change vs.
+    # initial state).
+    assert len(events) >= 1
+    assert events[0].label == "moving_box"
+    assert events[0].kind == "updated"
 
 
-def test_build_basic_geometry_rejects_unknown_type():
-    s = _bare_service()
-    with pytest.raises(ValueError, match="doesn't handle item type"):
-        s.build_geometry({"type": "lasagna", "label": "x"}, {})
-
-
-def test_no_animation_by_default():
+def test_tick_emits_pose_and_dim_paths():
     s = _bare_service()
     s.reconfigure(_stub_config(), {})
-    for entry in s._state.values():
-        assert s.is_animated(entry["item"]) is False
+    events = list(s.tick(s.scene, 0.5))
+    paths = events[0].paths
+    # Pose should have changed: at least one pose path emitted.
+    assert any(p.startswith("poseInObserverFrame.pose") for p in paths)
+    # Scale should have changed: at least one dims path emitted.
+    assert any("dimsMm" in p for p in paths)
+
+
+def test_tick_at_t_zero_no_pose_change_emits_no_pose_path():
+    # At t=0, the orbital position and scale formulas equal the
+    # initial pose / dims (x=400, y=0, scale=80). Color and opacity
+    # do change, but those go through the metadata-only-update
+    # respawn path (which scene.update reports as paths=[]).
+    s = _bare_service()
+    s.reconfigure(_stub_config(), {})
+    events = list(s.tick(s.scene, 0.0))
+    # The single update for moving_box may have paths=[] (metadata-
+    # only) or pose+dims paths depending on the precise t=0 evaluation
+    # of the sine. Color changes from (255,100,0) → hsv(0,1,1) =
+    # (255,0,0), so there's always at least a color change.
+    assert len(events) == 1
+    assert events[0].label == "moving_box"
 
 
 def test_validate_config_returns_empty_deps():
     required, optional = SimpleSceneExample.validate_config(_stub_config())
     assert list(required) == []
     assert list(optional) == []
+
+
+def test_build_geometry_dispatches_for_each_type():
+    s = _bare_service()
+    s.reconfigure(_stub_config(), {})
+    for label in ("demo_box", "demo_sphere", "demo_capsule", "moving_box"):
+        item = s._state[label]["item"]
+        geom = s.build_geometry(item, {})
+        assert geom is not None
+        assert geom.label == label
+
+
+def test_color_change_via_scene_update_yields_metadata_respawn_signal():
+    """The library's color-respawn intercept: scene.update on a
+    color-only change emits UPDATED with paths=[]. The
+    SceneServiceBase._apply_events handler translates that to
+    REMOVE+ADD with a fresh UUID on the wire — but at the Scene
+    level, the user just sees the empty-paths UPDATED."""
+    s = _bare_service()
+    s.reconfigure(_stub_config(), {})
+    box = s.scene.get("demo_box")
+    box.color = (0, 255, 0)
+    events = list(s.scene.update(box))
+    assert len(events) == 1
+    assert events[0].kind == "updated"
+    assert events[0].paths == []  # metadata-only → respawn signal

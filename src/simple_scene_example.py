@@ -1,45 +1,57 @@
 """``simple-scene-example`` — the smallest possible world-state-store
-service. Publishes three static geometries to the Viam 3D scene
-viewer.
+service. Publishes three static geometries plus one animated box to
+the Viam 3D scene viewer.
 
 READ THIS FIRST if you're learning the ``viam_visuals`` library.
-This is the canonical "I just want to add a few geometries to the
-3D scene viewer" reference. Everything a Viam Python module author
-has to write to ship a working WSS service is in this file — no
-``EasyResource`` mixin, no inherited helpers from elsewhere in the
-example module. Each method below is one a new user would write by
-hand.
+This is the canonical reference for "I want to add geometries to
+the Viam 3D scene viewer." Every method that a Viam Python module
+author has to write to ship a working WSS service is in this file —
+no ``EasyResource`` mixin, no inherited helpers, no hidden magic.
 
 What the library gives you for free
 -----------------------------------
 
 By subclassing :class:`viam_visuals.SceneServiceBase`, the gRPC
-``WorldStateStore`` implementation (``list_uuids`` /
-``get_transform`` / ``stream_transform_changes``), the state map,
-the subscriber broadcast, the animation tick loop, the UUID
-strategy, and the standard DoCommand verbs (``list`` / ``clear`` /
-``snapshot`` / ``apply_events`` etc.) all just work.
+``WorldStateStore`` implementation, the state map, subscriber
+broadcast, animation tick loop, UUID strategy, and the standard
+DoCommand verbs (``list`` / ``clear`` / ``snapshot`` /
+``apply_events`` / etc.) all just work.
+
+The library also hides the renderer's quirks. A subscriber sees a
+clean stream of ADDED / UPDATED / REMOVED events that the viewer
+honors — including for color and opacity changes, which the
+library translates into a transparent REMOVE + re-ADD with a fresh
+UUID under the hood (the viewer's UPDATED handler drops
+``metadata.*`` paths; see ``LESSONS.md`` for the full story).
 
 What this file shows
 --------------------
 
-* Manually registering the model with the Viam SDK Registry — the
-  step that ``EasyResource`` usually hides.
-* The four classmethod / instance method entry points the framework
-  calls: ``new`` (construct), ``validate_config`` (gate config),
-  ``reconfigure`` (build / rebuild the scene), and the inherited
-  lifecycle.
-* Building a scene from typed :class:`viam_visuals.Box` /
-  ``.Sphere`` / ``.Capsule`` values.
-* :func:`viam_visuals.build_basic_geometry` so the
-  ``build_geometry`` hook is a one-liner.
+1. Manually registering the model with the Viam SDK Registry — the
+   step that ``EasyResource`` usually hides.
+2. The framework entry points (``new``, ``validate_config``,
+   ``reconfigure``).
+3. Building a scene from typed :class:`viam_visuals.Box` /
+   ``.Sphere`` / ``.Capsule`` values, with :meth:`set_scene` to
+   install them.
+4. The :meth:`tick` hook: mutate typed objects in place, return
+   ``scene.update(...)`` events. The library diffs against the
+   committed snapshot, emits the right field-mask paths, and
+   broadcasts to subscribers.
+
+The :meth:`tick` method below drives a moving box through four
+animations simultaneously: orbital position, sinusoidal scale,
+HSV-rainbow color, and pulsing opacity. All four are expressed as
+direct mutations on a typed Box object.
 
 What it does NOT show
 ---------------------
 
-* Animations, presets, mesh / pointcloud assets, custom DoCommand
-  verbs. The full ``standalone-playground`` model in
-  ``src/service.py`` demonstrates each of those.
+* Configurable items / presets — see ``standalone-playground``.
+* Mesh and point-cloud assets — see ``standalone-playground``.
+* Custom DoCommand verbs — see ``standalone-playground``'s
+  ``get_entity_chunk``.
+* The driver pattern — see ``playground-driver`` + ``playground-visualizer``.
 
 Configure as a ``rdk:service:world_state_store`` service with model
 ``viam:example-visualizations-python:simple-scene-example``. No
@@ -47,7 +59,8 @@ attributes are required — the scene is hardcoded.
 """
 from __future__ import annotations
 
-from typing import Any, Dict, Mapping, Optional, Sequence, Tuple
+import math
+from typing import Any, Mapping, Sequence, Tuple
 
 from viam.proto.app.robot import ComponentConfig
 from viam.proto.common import Geometry, ResourceName
@@ -59,7 +72,6 @@ from viam.services.worldstatestore import WorldStateStore
 import viam_visuals as viz
 
 
-# Model identifier. The triplet is (org, module-id, model-name).
 MODEL = Model(
     ModelFamily("viam", "example-visualizations-python"),
     "simple-scene-example",
@@ -67,20 +79,24 @@ MODEL = Model(
 
 
 class SimpleSceneExample(viz.SceneServiceBase):
-    """Minimal WSS service — three fixed geometries, no animation."""
+    """Minimal WSS service — three static geometries + one animated box."""
 
     MODEL = MODEL
 
     def __init__(self, name: str) -> None:
-        # SceneServiceBase initializes the state map, subscriber
-        # list, tick task handle, and the WorldStateStore base.
         super().__init__(name)
+        # The moving box: a typed Box object whose fields we mutate
+        # on every tick. set_scene() installs it in self.scene; tick()
+        # mutates it; scene.update(self.moving_box) emits the diff.
+        self.moving_box: viz.Box = viz.Box(
+            label="moving_box",
+            pose=viz.Pose.at(x=400, y=0, z=200),
+            dims_mm=(120, 120, 120),
+            color=(255, 100, 0),
+            opacity=1.0,
+        )
 
     # ---- Framework entry points ---------------------------------------
-    #
-    # The Viam SDK Registry (see the call at the bottom of this file)
-    # routes resource lifecycle through these three classmethod /
-    # instance method hooks:
 
     @classmethod
     def new(
@@ -88,10 +104,8 @@ class SimpleSceneExample(viz.SceneServiceBase):
         config: ComponentConfig,
         dependencies: Mapping[ResourceName, ResourceBase],
     ) -> "SimpleSceneExample":
-        """Constructor: build the instance, then run reconfigure
-        immediately. The Viam framework does NOT call ``reconfigure``
-        automatically after construction — services start up with
-        no state unless we wire it explicitly here."""
+        """Build the instance and run reconfigure. The Viam framework
+        does NOT auto-call reconfigure after construction."""
         instance = cls(config.name)
         instance.reconfigure(config, dependencies)
         return instance
@@ -100,9 +114,7 @@ class SimpleSceneExample(viz.SceneServiceBase):
     def validate_config(
         cls, config: ComponentConfig,
     ) -> Tuple[Sequence[str], Sequence[str]]:
-        """Gate the machine config. Return ``(required_deps,
-        optional_deps)``. This service has no dependencies and
-        accepts no attributes — return empty lists."""
+        """No dependencies, no required attributes."""
         return [], []
 
     def reconfigure(
@@ -110,52 +122,74 @@ class SimpleSceneExample(viz.SceneServiceBase):
         config: ComponentConfig,
         dependencies: Mapping[ResourceName, ResourceBase],
     ) -> None:
-        """Called once on construction (via ``new`` above) and again
-        every time the machine config changes. Build the scene from
-        typed shape values and hand it to the library."""
-        items = viz.to_dicts(
+        """Install the scene with typed Visual objects. The library
+        broadcasts ADDED for each item and starts the tick task."""
+        self.set_scene(
             viz.Box(
-                label="demo_box",
-                pose=viz.Pose.at(x=-300, y=0, z=100),
+                "demo_box",
+                pose=viz.Pose.at(x=-400, y=0, z=100),
                 dims_mm=(150, 150, 150),
                 color=(230, 25, 75),  # red
             ),
             viz.Sphere(
-                label="demo_sphere",
-                pose=viz.Pose.at(x=0, y=0, z=100),
+                "demo_sphere",
+                pose=viz.Pose.at(x=-150, y=0, z=100),
                 radius_mm=90,
                 color=(60, 180, 75),  # green
             ),
             viz.Capsule(
-                label="demo_capsule",
-                pose=viz.Pose.at(x=300, y=0, z=100),
+                "demo_capsule",
+                pose=viz.Pose.at(x=100, y=0, z=100),
                 radius_mm=50,
                 length_mm=200,
                 color=(0, 130, 200),  # blue
             ),
+            self.moving_box,
         )
-        # The library handles the rest: install items in the state
-        # map, broadcast ADDED to any open subscribers, and start
-        # the animation tick task if any items animate (none here).
-        self.reconfigure_with(items)
 
     # ---- Library hooks ------------------------------------------------
-    #
-    # SceneServiceBase calls these during reconfigure / on every
-    # tick. We only need to implement build_geometry — the others
-    # (compute_tick, is_animated, load_preset, base_geom_for_item)
-    # have suitable defaults on the base class for a static scene
-    # with the standard primitive types.
 
     def build_geometry(
         self,
         item: Mapping[str, Any],
         override_geom: Mapping[str, Any],
     ) -> Geometry:
-        """Build the ``commonpb.Geometry`` proto for an item.
-        ``viam_visuals.build_basic_geometry`` dispatches on
-        ``item['type']`` for box / sphere / capsule / point / arrow."""
+        """Dispatch to the library helper for the standard non-asset
+        primitive types."""
         return viz.build_basic_geometry(item, override_geom)
+
+    def tick(self, scene: viz.Scene, t: float) -> Sequence[viz.SceneEvent]:
+        """Per-tick state for animated items: mutate typed objects
+        in place, return the diff via ``scene.update(...)``.
+
+        The moving box does four animations simultaneously:
+
+          * **Position**: orbit around its anchor at radius 150 mm,
+            period 4 s.
+          * **Scale**: pulse symmetrically between 80 mm and 160 mm,
+            period 2 s.
+          * **Color**: hue cycles through the rainbow at period 6 s.
+            The library translates color updates into a renderer-
+            visible REMOVE + re-ADD with a fresh UUID — the
+            ``metadata.color`` path the viewer would otherwise drop
+            never reaches the wire.
+          * **Opacity**: sinusoidal between 0.3 and 1.0, period 3 s.
+            Same library-side translation as color.
+        """
+        # Position: orbit around the box's anchor at (400, 0, 200).
+        self.moving_box.pose = viz.Pose.at(
+            x=400 + 150 * math.cos(2 * math.pi * t / 4),
+            y=0 + 150 * math.sin(2 * math.pi * t / 4),
+            z=200,
+        )
+        # Scale: pulse all three dimensions symmetrically.
+        scale = 80 + 80 * (1 + math.sin(2 * math.pi * t / 2)) / 2
+        self.moving_box.dims_mm = (scale, scale, scale)
+        # Color: cycle hue at full saturation / value.
+        self.moving_box.color = viz.hsv_to_rgb((t / 6) % 1.0)
+        # Opacity: pulse between 0.3 and 1.0.
+        self.moving_box.opacity = 0.3 + 0.7 * (1 + math.sin(2 * math.pi * t / 3)) / 2
+        return scene.update(self.moving_box)
 
 
 # Register the model with the Viam SDK at import time. The Module

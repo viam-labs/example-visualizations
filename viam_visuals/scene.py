@@ -111,31 +111,68 @@ class SceneEntry:
 #
 # See ``LESSONS.md::renderer-honors-only-pose-and-physicalobject-on-updated``.
 
-_POSE_KEY_TO_PATH = {
-    "x":     "poseInObserverFrame.pose.x",
-    "y":     "poseInObserverFrame.pose.y",
-    "z":     "poseInObserverFrame.pose.z",
-    "ox":    "poseInObserverFrame.pose.oX",
-    "oy":    "poseInObserverFrame.pose.oY",
-    "oz":    "poseInObserverFrame.pose.oZ",
-    "theta": "poseInObserverFrame.pose.theta",
-    # All seven keys share the renderer's ``poseInObserverFrame.pose``
-    # prefix, which triggers a full Pose re-read. Emitting per-subfield
-    # paths is informational; a single path of the right prefix is
-    # sufficient. Including the orientation-vector keys means
-    # orientation-only mutations (precession, "face the next waypoint")
-    # still emit at least one path and propagate to the renderer.
+# ---- Public field-mask path constants ----------------------------------
+#
+# Subclasses writing animation hooks (the legacy ``compute_tick``
+# path) need these strings to populate ``updated_fields``. They're
+# also the single source of truth Scene's diff machinery uses.
+#
+# Importable as ``viam_visuals.PATH_X`` etc., or as dicts via
+# ``viam_visuals.POSE_PATHS`` / ``GEOM_PATHS`` / ``METADATA_PATHS``.
+
+# Pose component paths. All share the renderer's
+# ``poseInObserverFrame.pose`` prefix, which triggers a full Pose
+# re-read; emitting per-subfield paths is informational, but any one
+# of the right prefix is sufficient.
+PATH_X = "poseInObserverFrame.pose.x"
+PATH_Y = "poseInObserverFrame.pose.y"
+PATH_Z = "poseInObserverFrame.pose.z"
+PATH_OX = "poseInObserverFrame.pose.oX"
+PATH_OY = "poseInObserverFrame.pose.oY"
+PATH_OZ = "poseInObserverFrame.pose.oZ"
+PATH_THETA = "poseInObserverFrame.pose.theta"
+
+# Geometry-trait paths. physicalObject.* paths re-read the geometry;
+# the renderer rebuilds the appropriate trait (Box / Sphere /
+# Capsule / Mesh / PointCloud).
+PATH_SPHERE_RADIUS = "physicalObject.geometryType.value.radiusMm"
+PATH_CAPSULE_RADIUS = "physicalObject.geometryType.value.radiusMm"
+PATH_CAPSULE_LENGTH = "physicalObject.geometryType.value.lengthMm"
+PATH_BOX_DIMS_X = "physicalObject.geometryType.value.dimsMm.x"
+PATH_BOX_DIMS_Y = "physicalObject.geometryType.value.dimsMm.y"
+PATH_BOX_DIMS_Z = "physicalObject.geometryType.value.dimsMm.z"
+PATH_MESH = "physicalObject.mesh"
+
+# Metadata paths the renderer DROPS on UPDATED events. Listed here
+# for completeness — animating a value at one of these requires the
+# REMOVE + re-ADD pattern (Scene + SceneServiceBase do this
+# automatically via the metadata-only-update intercept).
+PATH_METADATA_COLOR = "metadata.color"
+PATH_METADATA_OPACITY = "metadata.opacity"
+PATH_METADATA_SHOW_AXES = "metadata.show_axes_helper"
+PATH_METADATA_INVISIBLE = "metadata.invisible"
+
+POSE_PATHS: Dict[str, str] = {
+    "x": PATH_X, "y": PATH_Y, "z": PATH_Z,
+    "ox": PATH_OX, "oy": PATH_OY, "oz": PATH_OZ,
+    "theta": PATH_THETA,
 }
 
-_TOPLEVEL_KEY_TO_PATH = {
-    # physicalObject.* paths re-read the geometry; the renderer
-    # rebuilds the appropriate trait (Box / Sphere / Capsule).
-    "radius_mm": "physicalObject.geometryType.value.radiusMm",
-    "length_mm": "physicalObject.geometryType.value.lengthMm",
-    # color / opacity / show_axes_helper / invisible intentionally
-    # omitted — see file header. Metadata changes don't propagate
-    # via UPDATED.
+GEOM_PATHS: Dict[str, str] = {
+    "radius_mm": PATH_SPHERE_RADIUS,  # also matches capsule
+    "length_mm": PATH_CAPSULE_LENGTH,
 }
+
+METADATA_PATHS: Dict[str, str] = {
+    "color": PATH_METADATA_COLOR,
+    "opacity": PATH_METADATA_OPACITY,
+    "show_axes_helper": PATH_METADATA_SHOW_AXES,
+    "invisible": PATH_METADATA_INVISIBLE,
+}
+
+# Legacy aliases (private). Kept until callers in this file migrate.
+_POSE_KEY_TO_PATH = POSE_PATHS
+_TOPLEVEL_KEY_TO_PATH = GEOM_PATHS
 
 
 # ---- Scene -------------------------------------------------------------
@@ -204,8 +241,18 @@ class Scene:
     def update(self, *targets: Union[Visual, Composite]) -> List[SceneEvent]:
         """Diff each target against its committed snapshot and return
         UPDATED events for the changed visuals. Composites expand;
-        each constituent diffs independently. Visuals that haven't
-        changed produce no event.
+        each constituent diffs independently.
+
+        Visuals that haven't changed at all produce no event. Visuals
+        whose only changes are to metadata fields (color, opacity,
+        ``show_axes_helper``, ``invisible``) produce an UPDATED event
+        with ``paths=[]`` — the signal to consumers that a renderer
+        respawn (REMOVE + re-ADD with a fresh UUID) is required. The
+        renderer's UPDATED handler drops ``metadata.*`` paths, so a
+        plain UPDATED with metadata paths would be a no-op at the
+        viewer; ``SceneServiceBase._apply_scene_event`` and the
+        ``apply_events`` DoCommand handler both translate the
+        empty-paths UPDATED into a REMOVE + re-ADD on the wire.
 
         Raises :class:`ValueError` if any label isn't in the scene.
         """
@@ -219,9 +266,9 @@ class Scene:
         for v in flat:
             entry = self._state[v.label]
             new_dict = v.to_dict()
+            if new_dict == entry.committed:
+                continue  # No change at all.
             paths = _diff_paths(entry.committed, new_dict)
-            if not paths:
-                continue
             entry.committed = new_dict
             entry.visual = v
             out.append(SceneEvent(

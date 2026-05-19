@@ -79,6 +79,9 @@ from viam.utils import ValueTypes, struct_to_dict
 from ._internal.metadata import build_metadata
 from ._internal.mesh import extract_ply_vertex_colors
 from ._internal.pcd import build_pcd_chunk, parse_pcd_binary
+from .composites import Composite
+from .scene import Scene, SceneEvent, events_to_wire
+from .shapes import Visual
 from .uuid_strategy import VALID_STRATEGIES, initial_uuid, versioned_uuid
 
 
@@ -184,6 +187,12 @@ class SceneServiceBase(WorldStateStore):
         self.uuid_strategy: str = self.DEFAULT_UUID_STRATEGY
         self.parent_frame: str = self.DEFAULT_PARENT_FRAME
         self._animation_t0: float = 0.0
+        # Scene-centric API: a typed object-graph that backs the
+        # service state. Subclasses install Visuals via set_scene(...)
+        # and mutate them in tick(scene, t) — the library handles
+        # diff'ing, field-mask path emission, and renderer-quirk
+        # workarounds (metadata-only → REMOVE+ADD respawn) internally.
+        self.scene: Scene = Scene(parent_frame=self.parent_frame)
 
     # ------------------------------------------------------------------
     # Required hooks — subclass MUST implement
@@ -214,6 +223,44 @@ class SceneServiceBase(WorldStateStore):
             f"{type(self).__name__} must override read_asset()"
         )
 
+    def tick(self, scene: Scene, t: float) -> Sequence[SceneEvent]:
+        """Per-tick animation hook (recommended API).
+
+        Override to mutate typed Visual / Composite objects in ``scene``
+        and return the diff events from :meth:`Scene.update`. The
+        library broadcasts the events to subscribers and handles the
+        renderer's quirks (notably: empty-paths UPDATED events
+        produced by ``metadata.*``-only changes are translated to
+        REMOVE + re-ADD with a fresh UUID so the renderer actually
+        paints color / opacity changes).
+
+        Example::
+
+            def reconfigure(self, config, deps):
+                self.my_box = viz.Box(
+                    "demo", viz.Pose.at(z=100),
+                    dims_mm=(120, 120, 120),
+                    color=(255, 100, 0),
+                )
+                self.set_scene(self.my_box)
+
+            def tick(self, scene, t):
+                self.my_box.pose = viz.Pose.at(
+                    x=100 * math.cos(2 * math.pi * t / 4),
+                    y=100 * math.sin(2 * math.pi * t / 4),
+                    z=100,
+                )
+                self.my_box.color = viz.hsv_to_rgb((t / 6) % 1.0)
+                return scene.update(self.my_box)
+
+        The default returns ``[]`` (no animation). Subclasses that
+        override this method get the new path; subclasses that
+        override the legacy :meth:`compute_tick` instead get the
+        per-item declarative-animation path (which the library
+        plans to deprecate; see ``LIBRARY_PLAN.md``).
+        """
+        return []
+
     def compute_tick(
         self,
         item: Mapping[str, Any],
@@ -226,23 +273,36 @@ class SceneServiceBase(WorldStateStore):
         Sequence[str],
         Optional[Mapping[str, Any]],
     ]:
-        """Per-tick animation evaluation. Return
+        """Legacy per-item animation evaluation. Return
         ``(pose_dict, geom_override_dict, field_mask_paths, metadata_override)``.
 
+        .. deprecated::
+            Use :meth:`tick` (scene-centric) instead. The new API
+            mutates typed Visual objects directly, avoiding the
+            tuple-return shape and field-mask-path bookkeeping.
+
         The default implementation is "no animation" — returns the
-        base pose, no geom override, no paths, no overrides. Subclass
-        provides the per-mode math (typically by delegating to a
-        module animation module).
+        base pose, no geom override, no paths, no overrides.
         """
         return base_pose, {}, [], None
 
     def is_animated(self, item: Mapping[str, Any]) -> bool:
-        """Return True iff this item's animation should drive ticks.
-        The default reads ``item.animation.mode`` and returns False
-        for ``"none"`` or absent."""
+        """Return True iff this item's animation should drive ticks
+        under the legacy :meth:`compute_tick` path. The default reads
+        ``item.animation.mode`` and returns False for ``"none"`` or
+        absent.
+
+        Not consulted under the new :meth:`tick` (scene-centric)
+        path — that path runs every tick and emits no events if
+        ``scene.update(...)`` returns nothing.
+        """
         anim = item.get("animation") or {}
         mode = anim.get("mode", "none")
         return mode != "" and mode != "none"
+
+    def _has_scene_tick(self) -> bool:
+        """True if the subclass overrode :meth:`tick`."""
+        return type(self).tick is not SceneServiceBase.tick
 
     # ------------------------------------------------------------------
     # Optional hooks
@@ -359,6 +419,48 @@ class SceneServiceBase(WorldStateStore):
             parent_frame=parent_frame,
         )
 
+    def set_scene(
+        self,
+        *visuals: Union[Visual, Composite],
+        tick_hz: Optional[float] = None,
+        uuid_strategy: Optional[str] = None,
+        parent_frame: Optional[str] = None,
+    ) -> None:
+        """Install typed Visual / Composite objects as the new scene.
+        Composites expand to their constituent Visuals; each is
+        tracked in :attr:`self.scene` so subclasses can keep
+        references and mutate them on each :meth:`tick`.
+
+        Broadcasts REMOVED for any prior state and ADDED for the new
+        state, then restarts the tick task if this service uses
+        animation.
+
+        Example::
+
+            def reconfigure(self, config, deps):
+                self.my_box = viz.Box(
+                    "demo_box", viz.Pose.at(z=100),
+                    dims_mm=(150, 150, 150),
+                    color=(230, 25, 75),
+                )
+                self.set_scene(self.my_box)
+
+        For services that build wire-format dicts directly (no typed
+        objects), use :meth:`reconfigure_with` instead.
+        """
+        parent = parent_frame if parent_frame is not None else self.parent_frame
+        # Build a fresh Scene so subscribers' initial-burst sees the
+        # post-mutation snapshot.
+        self.scene = Scene(parent_frame=parent)
+        self.scene.add(*visuals)
+        items = [entry.committed for entry in self.scene._state.values()]
+        self.reconfigure_with(
+            items,
+            tick_hz=tick_hz,
+            uuid_strategy=uuid_strategy,
+            parent_frame=parent,
+        )
+
     def reconfigure_with(
         self,
         items: Sequence[Mapping[str, Any]],
@@ -408,10 +510,15 @@ class SceneServiceBase(WorldStateStore):
                 transform=s["transform"],
             ))
 
-        # Reset animation clock and (re)start the tick task if any
-        # items are animated.
+        # Reset animation clock and (re)start the tick task if the
+        # subclass overrides ``tick(scene, t)`` (Scene-centric path)
+        # OR any item has a declarative animation spec (legacy
+        # ``compute_tick`` path).
         self._animation_t0 = time.monotonic()
-        if any(self.is_animated(s["item"]) for s in self._state.values()):
+        wants_tick = self._has_scene_tick() or any(
+            self.is_animated(s["item"]) for s in self._state.values()
+        )
+        if wants_tick:
             try:
                 self._tick_task = asyncio.create_task(self._tick_loop())
             except RuntimeError:
@@ -567,6 +674,24 @@ class SceneServiceBase(WorldStateStore):
 
     async def _tick_once(self) -> None:
         t = time.monotonic() - self._animation_t0
+
+        # Scene-centric tick path: if the subclass overrides
+        # ``tick(scene, t)``, call it and apply the returned events
+        # through the same machinery ``apply_events`` uses. Subclass
+        # gets the typed Scene API; the library handles wire format,
+        # subscriber broadcasts, and the metadata-only-respawn
+        # intercept.
+        if self._has_scene_tick():
+            try:
+                events = list(self.tick(self.scene, t) or [])
+            except Exception as e:
+                LOGGER.warning(f"tick(scene, t) failed: {type(e).__name__}: {e}")
+                events = []
+            if events:
+                wire_events = events_to_wire(events)
+                await self._apply_events({"events": wire_events})
+            return
+
         async with self._lock:
             for label, s in list(self._state.items()):
                 item = s["item"]
@@ -978,6 +1103,43 @@ class SceneServiceBase(WorldStateStore):
                         new_item = dict(evt.get("item") or {})
                         new_item["label"] = label
                         paths = list(evt.get("paths") or [])
+
+                        if not paths:
+                            # Empty paths means a metadata-only change
+                            # (color / opacity / show_axes_helper /
+                            # invisible). The renderer's UPDATED handler
+                            # drops metadata.* paths, so a plain UPDATED
+                            # would be a no-op at the viewer. Respawn:
+                            # REMOVE the entity with its current UUID,
+                            # then ADD it back with a fresh UUID so the
+                            # renderer re-reads metadata at spawn.
+                            old_tf = s["transform"]
+                            self._broadcast(StreamTransformChangesResponse(
+                                change_type=TransformChangeType.TRANSFORM_CHANGE_TYPE_REMOVED,
+                                transform=old_tf,
+                            ))
+                            new_uuid = versioned_uuid(label)
+                            s["item"] = new_item
+                            s["base_pose"] = dict(new_item.get("pose") or {})
+                            for k, default in (("x", 0.0), ("y", 0.0), ("z", 0.0),
+                                               ("ox", 0.0), ("oy", 0.0), ("oz", 1.0),
+                                               ("theta", 0.0)):
+                                s["base_pose"].setdefault(k, default)
+                            s["base_geom"] = self.base_geom_for_item(new_item)
+                            geom_proto = self.build_geometry(new_item, s["base_geom"])
+                            new_tf = self._build_transform(
+                                new_item, s["base_pose"], geom_proto, new_uuid,
+                                self.parent_frame,
+                            )
+                            s["uuid"] = new_uuid
+                            s["transform"] = new_tf
+                            self._broadcast(StreamTransformChangesResponse(
+                                change_type=TransformChangeType.TRANSFORM_CHANGE_TYPE_ADDED,
+                                transform=new_tf,
+                            ))
+                            updated += 1
+                            continue
+
                         s["item"] = new_item
                         s["base_pose"] = dict(new_item.get("pose") or {})
                         for k, default in (("x", 0.0), ("y", 0.0), ("z", 0.0),
@@ -1020,10 +1182,10 @@ class SceneServiceBase(WorldStateStore):
         }
 
     def _maybe_restart_tick(self) -> None:
-        has_animated = any(
+        wants_tick = self._has_scene_tick() or any(
             self.is_animated(s["item"]) for s in self._state.values()
         )
-        if has_animated and (self._tick_task is None or self._tick_task.done()):
+        if wants_tick and (self._tick_task is None or self._tick_task.done()):
             self._animation_t0 = time.monotonic()
             try:
                 self._tick_task = asyncio.create_task(self._tick_loop())

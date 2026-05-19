@@ -48,7 +48,7 @@ from .animations import (
     Trajectory,
     normalize_animation,
 )
-from .color import ColorLike, normalize_color
+from .color import ColorLike, hsv_to_rgb, normalize_color
 from .composites import (
     BoundingBox,
     Composite,
@@ -71,6 +71,27 @@ from .shapes import (
 from . import registry
 from .scene import (
     ADDED,
+    GEOM_PATHS,
+    METADATA_PATHS,
+    PATH_BOX_DIMS_X,
+    PATH_BOX_DIMS_Y,
+    PATH_BOX_DIMS_Z,
+    PATH_CAPSULE_LENGTH,
+    PATH_CAPSULE_RADIUS,
+    PATH_MESH,
+    PATH_METADATA_COLOR,
+    PATH_METADATA_INVISIBLE,
+    PATH_METADATA_OPACITY,
+    PATH_METADATA_SHOW_AXES,
+    PATH_OX,
+    PATH_OY,
+    PATH_OZ,
+    PATH_SPHERE_RADIUS,
+    PATH_THETA,
+    PATH_X,
+    PATH_Y,
+    PATH_Z,
+    POSE_PATHS,
     REMOVED,
     UPDATED,
     Scene,
@@ -94,6 +115,7 @@ __all__ = [
     "lerp_pose",
     "ColorLike",
     "AnimationLike",
+    "hsv_to_rgb",
     "normalize_pose",
     "normalize_color",
     "normalize_animation",
@@ -143,6 +165,19 @@ __all__ = [
     "UPDATED",
     "REMOVED",
     "events_to_wire",
+    # Field-mask path constants
+    "POSE_PATHS",
+    "GEOM_PATHS",
+    "METADATA_PATHS",
+    "PATH_X", "PATH_Y", "PATH_Z",
+    "PATH_OX", "PATH_OY", "PATH_OZ",
+    "PATH_THETA",
+    "PATH_BOX_DIMS_X", "PATH_BOX_DIMS_Y", "PATH_BOX_DIMS_Z",
+    "PATH_SPHERE_RADIUS",
+    "PATH_CAPSULE_RADIUS", "PATH_CAPSULE_LENGTH",
+    "PATH_MESH",
+    "PATH_METADATA_COLOR", "PATH_METADATA_OPACITY",
+    "PATH_METADATA_SHOW_AXES", "PATH_METADATA_INVISIBLE",
     # In-process registry
     "registry",
 ]

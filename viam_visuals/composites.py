@@ -13,6 +13,21 @@ follow consistent label conventions (e.g.,
 ``CoordinateFrame("tcp").to_visuals()`` produces ``"tcp"`` for the
 anchor and ``"tcp_axis_x"`` / ``"_y"`` / ``"_z"`` for the axes).
 
+Mutation pattern
+----------------
+
+Composites can be passed to :meth:`viam_visuals.Scene.add` and
+:meth:`viam_visuals.Scene.update`. The Scene expands the composite,
+diffs each constituent, and emits one event per changed Visual.
+After mutating a composite field (``line.width_mm = 12``,
+``plan.waypoints = [...]``), call ``scene.update(composite)`` to
+re-expand and emit the deltas.
+
+The scene tracks constituents by label — internal sub-Visual labels
+follow a deterministic pattern per composite class (documented on
+each). Two composites with the same label prefix WILL collide; use
+the optional ``namespace`` on the driver to scope them.
+
 Single-item "composites" — like a point-to-point arrow — live on
 the primitive classes themselves as alternate constructors (e.g.,
 :meth:`viam_visuals.Arrow.from_to`).

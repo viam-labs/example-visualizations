@@ -54,7 +54,13 @@ class Visual:
     opacity: Optional[float] = None
     show_axes_helper: bool = False
     invisible: bool = False
-    animation: Any = None  # AnimationLike — typed at to_dict() time
+    # AnimationLike (Union of None / Animation / Mapping). Typed as
+    # Any here so the dataclass default-value machinery doesn't fight
+    # us; normalize_animation() coerces at to_dict() time. The new
+    # SceneServiceBase.tick(scene, t) hook doesn't use this field at
+    # all — recommended pattern is to leave it None and mutate the
+    # Visual directly each tick.
+    animation: Any = None
 
     _TYPE: str = field(default="", repr=False, init=False)
 
@@ -165,11 +171,14 @@ class Capsule(Visual):
 
 @dataclass
 class Point(Visual):
-    """Marker point.
+    """Marker point — a sphere with a small but visible radius.
 
-    The wire format has no Point primitive; this is internally rendered
-    as a small sphere whose radius is fixed by the service implementation
-    (a zero-radius sphere renders as nothing in the viewer).
+    The proto Geometry oneof has no Point variant, and the viewer
+    skips zero-radius geometries. The service implementation
+    (:func:`viam_visuals.build_basic_geometry`) substitutes a sphere
+    with a fixed 8 mm radius so the marker has a visible footprint.
+
+    For a sphere with custom radius, use :class:`Sphere` directly.
     """
 
     _TYPE: str = field(default="point", repr=False, init=False)
@@ -251,9 +260,15 @@ class Mesh(Visual):
     time unless ``raw_stl=True``).
 
     ``mesh_path`` is resolved by the service implementation; the
-    library doesn't open files. ``raw_stl=True`` is a deliberate
-    opt-out of the STL→PLY conversion for the silent-drop bug-demo;
-    production callers should leave it ``False``.
+    library doesn't open files.
+
+    .. warning::
+        ``raw_stl=True`` is an experimental knob that deliberately
+        bypasses the library's STL→PLY conversion. It exists to
+        reproduce a renderer-side bug (the viewer silently drops
+        ``content_type="stl"`` despite the proto accepting it).
+        Production callers should leave it ``False``; future
+        versions may remove the field entirely.
     """
 
     mesh_path: str = ""
