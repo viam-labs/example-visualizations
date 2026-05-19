@@ -219,8 +219,9 @@ class SimpleSceneExample(viz.SceneServiceBase):
             radius_mm=150.0,
             t=t,
         )
-        # Scale: pulse all three dimensions symmetrically.
-        scale = 80 + 80 * (1 + math.sin(2 * math.pi * t / 2)) / 2
+        # Scale: pulse all three dimensions symmetrically between
+        # 80 and 160 mm — using the viz.pulse_range helper.
+        scale = viz.pulse_range(80, 160, period_s=2.0, t=t)
         self.moving_box.dims_mm = (scale, scale, scale)
         # Color and opacity trigger renderer respawns (the viewer
         # drops metadata.* paths on UPDATED, so the library emits

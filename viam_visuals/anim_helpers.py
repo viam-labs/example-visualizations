@@ -39,6 +39,8 @@ __all__ = [
     "orbit_pose",
     "oscillate_pose",
     "swing_pose",
+    "pulse_range",
+    "trajectory_pose",
 ]
 
 
@@ -137,3 +139,68 @@ def swing_pose(
         b,
         theta=b.theta + amplitude_deg * math.sin(2 * math.pi * t / period_s),
     )
+
+
+def pulse_range(lo: float, hi: float, period_s: float, t: float) -> float:
+    """Return a sinusoidal value swinging between ``lo`` and ``hi``
+    with the given period.
+
+    Use for any scalar field that should breathe between two
+    extremes — sphere radius, box dim, opacity, etc.
+
+    Example — box that pulses between 80 mm and 160 mm at period 2 s::
+
+        scale = viz.pulse_range(80, 160, period_s=2, t=t)
+        self.box.dims_mm = (scale, scale, scale)
+        return scene.update(self.box)
+
+    Equivalent to ``base + amplitude × sin(2π t / period_s)`` where
+    ``base = (lo + hi) / 2`` and ``amplitude = (hi - lo) / 2``.
+    """
+    base = (lo + hi) / 2.0
+    amplitude = (hi - lo) / 2.0
+    return base + amplitude * math.sin(2 * math.pi * t / period_s)
+
+
+def trajectory_pose(
+    waypoints: list,
+    duration_s: float,
+    t: float,
+    loop: bool = True,
+) -> Pose:
+    """Return an interpolated pose along a multi-waypoint trajectory.
+
+    Walks ``waypoints`` over ``duration_s`` seconds, lerping between
+    adjacent pairs with :func:`lerp_pose` (quaternion SLERP on
+    orientation). With ``loop=True``, the trajectory restarts (snap
+    back) once ``t`` exceeds ``duration_s``; with ``loop=False``,
+    clamps to the final waypoint.
+
+    The waypoint list should match the shape of a planner output
+    (CBiRRT / RRT* / motion-service): each element is a PoseLike
+    (Pose, Pose-shaped dict, or None for identity).
+
+    Example — runner walking a 5-waypoint plan over 12 seconds::
+
+        plan = [Pose.at(...), Pose.at(...), ...]
+        # In scene_tick:
+        self.runner.pose = viz.trajectory_pose(plan, 12.0, t)
+        return scene.update(self.runner)
+    """
+    # Local import to avoid a top-level cycle (lerp_pose lives in
+    # pose.py which this module already imports from).
+    from .pose import lerp_pose
+
+    n = len(waypoints)
+    if n < 2:
+        raise ValueError(f"trajectory_pose needs ≥ 2 waypoints; got {n}")
+    n_segs = n - 1
+    if loop:
+        progress = (t / duration_s * n_segs) % n_segs
+    else:
+        progress = max(0.0, min(float(n_segs), t / duration_s * n_segs))
+    seg_idx = int(progress)
+    if seg_idx >= n_segs:
+        seg_idx = n_segs - 1
+    local = progress - seg_idx
+    return lerp_pose(waypoints[seg_idx], waypoints[seg_idx + 1], local)

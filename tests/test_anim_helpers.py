@@ -107,3 +107,62 @@ def test_swing_pose_preserves_position():
     base = viz.Pose.at(x=100, y=200, z=300, theta=10)
     p = viz.swing_pose(base, period_s=4.0, amplitude_deg=15.0, t=1.0)
     assert (p.x, p.y, p.z) == (100, 200, 300)
+
+
+# ---- pulse_range -----------------------------------------------------
+
+def test_pulse_range_at_t_zero_is_midpoint():
+    # sin(0) = 0 → returns the midpoint.
+    assert viz.pulse_range(80, 160, period_s=2.0, t=0.0) == 120.0
+
+
+def test_pulse_range_at_quarter_period_is_high():
+    # sin(π/2) = 1 → returns hi.
+    assert abs(viz.pulse_range(80, 160, period_s=4.0, t=1.0) - 160.0) < 1e-9
+
+
+def test_pulse_range_at_three_quarter_period_is_low():
+    # sin(3π/2) = -1 → returns lo.
+    assert abs(viz.pulse_range(80, 160, period_s=4.0, t=3.0) - 80.0) < 1e-9
+
+
+def test_pulse_range_handles_negative_amplitude_via_reversed_args():
+    # Same period, just reversed lo/hi — the sinusoid is flipped.
+    a = viz.pulse_range(80, 160, period_s=4.0, t=1.0)
+    b = viz.pulse_range(160, 80, period_s=4.0, t=1.0)
+    assert abs((a - 120) + (b - 120)) < 1e-9
+
+
+# ---- trajectory_pose -------------------------------------------------
+
+def test_trajectory_pose_at_t_zero_is_first_waypoint():
+    wps = [viz.Pose.at(x=0), viz.Pose.at(x=100), viz.Pose.at(x=200)]
+    p = viz.trajectory_pose(wps, duration_s=10.0, t=0.0)
+    assert abs(p.x - 0) < 1e-9
+
+
+def test_trajectory_pose_at_midpoint_of_segment():
+    # 2 segments, 10 s total. At t = 2.5 s (half through first 5 s
+    # segment) we're at midpoint between wp 0 and wp 1.
+    wps = [viz.Pose.at(x=0), viz.Pose.at(x=100), viz.Pose.at(x=200)]
+    p = viz.trajectory_pose(wps, duration_s=10.0, t=2.5)
+    assert abs(p.x - 50) < 1e-6
+
+
+def test_trajectory_pose_at_lap_end_loop_snaps_back():
+    wps = [viz.Pose.at(x=0), viz.Pose.at(x=100)]
+    p = viz.trajectory_pose(wps, duration_s=10.0, t=10.0, loop=True)
+    # t=10 mod 10 = 0 → first waypoint.
+    assert abs(p.x - 0) < 1e-6
+
+
+def test_trajectory_pose_no_loop_clamps_at_final():
+    wps = [viz.Pose.at(x=0), viz.Pose.at(x=100)]
+    p = viz.trajectory_pose(wps, duration_s=10.0, t=20.0, loop=False)
+    # Clamped to final waypoint.
+    assert abs(p.x - 100) < 1e-6
+
+
+def test_trajectory_pose_raises_on_too_few_waypoints():
+    with pytest.raises(ValueError, match="≥ 2 waypoints"):
+        viz.trajectory_pose([viz.Pose.at()], duration_s=10.0, t=0.0)
