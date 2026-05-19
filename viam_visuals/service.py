@@ -79,6 +79,7 @@ from viam.utils import ValueTypes, struct_to_dict
 from ._internal.metadata import build_metadata
 from ._internal.mesh import extract_ply_vertex_colors
 from ._internal.pcd import build_pcd_chunk, parse_pcd_binary
+from .animations import Animation
 from .composites import Composite
 from .scene import Scene, SceneEvent, events_to_wire
 from .shapes import Visual
@@ -193,6 +194,12 @@ class SceneServiceBase(WorldStateStore):
         # diff'ing, field-mask path emission, and renderer-quirk
         # workarounds (metadata-only → REMOVE+ADD respawn) internally.
         self.scene: Scene = Scene(parent_frame=self.parent_frame)
+        # Per-label snapshots of Visuals at install time. The default
+        # scene_tick passes these as the "base" / rest state when
+        # calling Animation.apply on each animated Visual; the apply
+        # method computes deltas relative to base rather than mutating
+        # state through itself.
+        self._base_visuals: Dict[str, Visual] = {}
 
     # ------------------------------------------------------------------
     # Required hooks — subclass MUST implement
@@ -227,43 +234,54 @@ class SceneServiceBase(WorldStateStore):
         """Per-tick animation hook (recommended API).
 
         Called by the library's tick loop at ``tick_hz`` (default
-        30 Hz). Override to mutate typed Visual / Composite objects
-        in ``scene`` and return the diff events from
-        :meth:`Scene.update`. The library broadcasts the returned
-        events to subscribers and handles the renderer's quirks
-        (notably: empty-paths UPDATED events produced by
-        ``metadata.*``-only changes are translated to REMOVE +
-        re-ADD with a fresh UUID so the renderer actually paints
-        color / opacity changes).
+        30 Hz). The default implementation iterates the scene and
+        dispatches to each Visual's ``animation.apply(visual, base, t)``
+        — the typed Animation dataclass (Spin, Orbit, Pulse, …)
+        mutates the Visual based on its rest state. The returned
+        events are broadcast to subscribers.
 
-        ``t`` is elapsed seconds since the last reconfigure.
+        Subclasses can override for custom behavior (mutate Visuals
+        directly without going through Animation specs), or call
+        ``super().scene_tick(scene, t)`` to chain the default
+        dispatch with custom code.
 
-        Example::
-
-            def reconfigure(self, config, deps):
-                self.my_box = viz.Box(
-                    "demo", viz.Pose.at(z=100),
-                    dims_mm=(120, 120, 120),
-                    color=(255, 100, 0),
-                )
-                self.set_scene(self.my_box)
+        Example — custom override::
 
             def scene_tick(self, scene, t):
-                self.my_box.pose = viz.Pose.at(
-                    x=100 * math.cos(2 * math.pi * t / 4),
-                    y=100 * math.sin(2 * math.pi * t / 4),
-                    z=100,
-                )
-                self.my_box.color = viz.hsv_to_rgb((t / 6) % 1.0)
+                self.my_box.pose = viz.spin_pose(self.base_pose, 3.0, t)
                 return scene.update(self.my_box)
 
-        The default returns ``[]`` (no animation). Subclasses that
-        override this method get the new path; subclasses that
-        override the legacy :meth:`compute_tick` instead get the
-        per-item declarative-animation path (which the library
-        plans to deprecate; see ``LIBRARY_PLAN.md``).
+        Example — declarative (use Animation specs on Visuals,
+        rely on the default dispatch)::
+
+            self.set_scene(
+                viz.Sphere("a", radius_mm=50, animation=viz.Spin(period_s=3)),
+                viz.Box("b", dims_mm=(100,100,100), animation=viz.Pulse(amplitude_mm=20)),
+            )
+            # No scene_tick override needed; defaults dispatch each
+            # Animation.apply at tick_hz.
         """
-        return []
+        events: List[SceneEvent] = []
+        for label in scene.labels():
+            v = scene.get(label)
+            if v is None:
+                continue
+            anim = v.animation
+            if not isinstance(anim, Animation):
+                continue  # No spec, or legacy dict spec (compute_tick path)
+            base = self._base_visuals.get(label)
+            if base is None:
+                continue
+            try:
+                anim.apply(v, base, t)
+            except Exception as e:
+                LOGGER.warning(
+                    f"animation.apply failed for {label!r} ({type(anim).__name__}): "
+                    f"{type(e).__name__}: {e}"
+                )
+                continue
+            events.extend(scene.update(v))
+        return events
 
     def compute_tick(
         self,
@@ -305,8 +323,16 @@ class SceneServiceBase(WorldStateStore):
         return mode != "" and mode != "none"
 
     def _has_scene_tick(self) -> bool:
-        """True if the subclass overrode :meth:`scene_tick`."""
-        return type(self).scene_tick is not SceneServiceBase.scene_tick
+        """True if the subclass overrode :meth:`scene_tick`, OR the
+        scene has any typed Animation specs (default dispatch will
+        produce work)."""
+        if type(self).scene_tick is not SceneServiceBase.scene_tick:
+            return True
+        for label in self.scene.labels():
+            v = self.scene.get(label)
+            if v is not None and isinstance(v.animation, Animation):
+                return True
+        return False
 
     # ------------------------------------------------------------------
     # Optional hooks
@@ -457,6 +483,13 @@ class SceneServiceBase(WorldStateStore):
         # post-mutation snapshot.
         self.scene = Scene(parent_frame=parent)
         self.scene.add(*visuals)
+        # Snapshot each Visual's rest state for the default
+        # scene_tick dispatch (Animation.apply takes base, t).
+        import copy as _copy
+        self._base_visuals = {
+            label: _copy.deepcopy(self.scene.get(label))
+            for label in self.scene.labels()
+        }
         items = [entry.committed for entry in self.scene._state.values()]
         self.reconfigure_with(
             items,

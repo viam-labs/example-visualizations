@@ -38,7 +38,7 @@ Available modes
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, List, Mapping, MutableMapping, Optional, Union
+from typing import Any, ClassVar, List, Mapping, MutableMapping, Optional, Union
 
 from .pose import normalize_pose
 
@@ -68,6 +68,13 @@ class Animation:
     Subclasses set ``_MODE`` to the wire-format mode string and
     override :meth:`_fields` to contribute their mode-specific keys.
     The default :meth:`to_dict` combines both.
+
+    Subclasses also override :meth:`apply` to mutate a Visual based
+    on its base (rest) state and elapsed time ``t``. The library's
+    default :meth:`SceneServiceBase.scene_tick` iterates the scene,
+    calls ``visual.animation.apply(visual, base, t)`` for each
+    animated Visual, and emits the resulting ``scene.update``
+    events.
     """
 
     _MODE: str = field(default="", repr=False, init=False)
@@ -81,6 +88,15 @@ class Animation:
         out: MutableMapping[str, Any] = {"mode": self._MODE}
         out.update(self._fields())
         return out
+
+    def apply(self, visual: Any, base: Any, t: float) -> None:
+        """Mutate ``visual`` in place based on ``base`` (rest state)
+        and elapsed time ``t`` (seconds since reconfigure).
+
+        Default: no-op (Static / Animation-base behavior). Subclasses
+        override.
+        """
+        return None
 
 
 @dataclass
@@ -102,6 +118,10 @@ class Spin(Animation):
 
     def _fields(self) -> Mapping[str, Any]:
         return {"period_s": float(self.period_s)}
+
+    def apply(self, visual: Any, base: Any, t: float) -> None:
+        from .anim_helpers import spin_pose
+        visual.pose = spin_pose(base.pose, self.period_s, t)
 
 
 @dataclass
@@ -126,6 +146,13 @@ class Swing(Animation):
         if self.phase_offset_s:
             out["phase_offset_s"] = float(self.phase_offset_s)
         return out
+
+    def apply(self, visual: Any, base: Any, t: float) -> None:
+        from .anim_helpers import swing_pose
+        visual.pose = swing_pose(
+            base.pose, self.period_s, self.amplitude_deg,
+            t + self.phase_offset_s,
+        )
 
 
 @dataclass
@@ -157,6 +184,13 @@ class Oscillate(Animation):
             out["phase_offset_s"] = float(self.phase_offset_s)
         return out
 
+    def apply(self, visual: Any, base: Any, t: float) -> None:
+        from .anim_helpers import oscillate_pose
+        visual.pose = oscillate_pose(
+            base.pose, self.period_s, self.amplitude_mm,
+            t + self.phase_offset_s, axis=self.axis,
+        )
+
 
 @dataclass
 class Orbit(Animation):
@@ -173,6 +207,14 @@ class Orbit(Animation):
             "radius_mm": float(self.radius_mm),
             "period_s": float(self.period_s),
         }
+
+    def apply(self, visual: Any, base: Any, t: float) -> None:
+        from .anim_helpers import orbit_pose
+        # Legacy compute_tick orbited only in the XY plane; preserve
+        # that semantics here with axis="z".
+        visual.pose = orbit_pose(
+            base.pose, self.period_s, self.radius_mm, t, axis="z",
+        )
 
 
 @dataclass
@@ -198,6 +240,29 @@ class Pulse(Animation):
             out["axis"] = self.axis
         return out
 
+    def apply(self, visual: Any, base: Any, t: float) -> None:
+        import math
+        delta = self.amplitude_mm * math.sin(2 * math.pi * t / self.period_s)
+        # Dispatch on Visual type. Local imports avoid the
+        # animations ↔ shapes circular dep.
+        from .shapes import Box, Capsule, Sphere
+        if isinstance(visual, Box):
+            base_dims = base.dims_mm
+            if self.axis == "x":
+                visual.dims_mm = (max(0.1, base_dims[0] + delta), base_dims[1], base_dims[2])
+            elif self.axis == "y":
+                visual.dims_mm = (base_dims[0], max(0.1, base_dims[1] + delta), base_dims[2])
+            elif self.axis == "z":
+                visual.dims_mm = (base_dims[0], base_dims[1], max(0.1, base_dims[2] + delta))
+            else:
+                visual.dims_mm = tuple(max(0.1, d + delta) for d in base_dims)
+        elif isinstance(visual, Sphere):
+            visual.radius_mm = max(0.1, base.radius_mm + delta)
+        elif isinstance(visual, Capsule):
+            visual.radius_mm = max(0.1, base.radius_mm + delta)
+            visual.length_mm = max(0.1, base.length_mm + delta)
+        # Other shapes: no-op (no scalable primary dim).
+
 
 @dataclass
 class Breathe(Animation):
@@ -216,6 +281,12 @@ class Breathe(Animation):
             "amplitude": float(self.amplitude),
             "period_s": float(self.period_s),
         }
+
+    def apply(self, visual: Any, base: Any, t: float) -> None:
+        import math
+        base_opacity = base.opacity if base.opacity is not None else 1.0
+        opacity = base_opacity + self.amplitude * math.sin(2 * math.pi * t / self.period_s)
+        visual.opacity = max(0.0, min(1.0, opacity))
 
 
 @dataclass
@@ -246,6 +317,12 @@ class Flicker(Animation):
             out["rotate_uuid_on_readd"] = False
         return out
 
+    def apply(self, visual: Any, base: Any, t: float) -> None:
+        # Compute the phase within the cycle. duty_cycle of 0.5 means
+        # visible for the first half, invisible for the second.
+        cycle = (t + self.phase_offset_s) % self.period_s
+        visual.invisible = cycle / self.period_s >= self.duty_cycle
+
 
 @dataclass
 class Lifecycle(Animation):
@@ -275,6 +352,32 @@ class Lifecycle(Animation):
             out["phase_offset_s"] = float(self.phase_offset_s)
         return out
 
+    # Official viam-visualization lifecycle colors / opacities.
+    _COLOR_APPEAR: ClassVar[tuple] = (95, 150, 255)
+    _COLOR_ALIVE: ClassVar[tuple] = (255, 150, 50)
+    _COLOR_DISAPPEAR: ClassVar[tuple] = (255, 90, 70)
+    _OPACITY_APPEAR: ClassVar[float] = 0.5
+    _OPACITY_ALIVE: ClassVar[float] = 1.0
+    _OPACITY_DISAPPEAR: ClassVar[float] = 0.5
+
+    def apply(self, visual: Any, base: Any, t: float) -> None:
+        cycle = self.appear_s + self.alive_s + self.disappear_s + self.gone_s
+        local = (t + self.phase_offset_s) % cycle
+        if local < self.appear_s:
+            visual.color = self._COLOR_APPEAR
+            visual.opacity = self._OPACITY_APPEAR
+            visual.invisible = False
+        elif local < self.appear_s + self.alive_s:
+            visual.color = self._COLOR_ALIVE
+            visual.opacity = self._OPACITY_ALIVE
+            visual.invisible = False
+        elif local < self.appear_s + self.alive_s + self.disappear_s:
+            visual.color = self._COLOR_DISAPPEAR
+            visual.opacity = self._OPACITY_DISAPPEAR
+            visual.invisible = False
+        else:
+            visual.invisible = True
+
 
 @dataclass
 class ForceVector(Animation):
@@ -300,6 +403,34 @@ class ForceVector(Animation):
             "precession_speed": float(self.precession_speed),
             "color_speed": float(self.color_speed),
         }
+
+    def apply(self, visual: Any, base: Any, t: float) -> None:
+        import math
+        from .color import hsv_to_rgb
+        from .pose import Pose
+        from .shapes import Arrow
+        if not isinstance(visual, Arrow):
+            return  # ForceVector only meaningful for Arrows
+        phase = 2 * math.pi * t / self.period_s
+        # Length oscillates around base; radius offset by π/3 so they
+        # don't tick in sync (reads as a real changing force).
+        visual.length_mm = max(0.1, base.length_mm + self.length_amplitude_mm * math.sin(phase))
+        visual.radius_mm = max(0.1, base.radius_mm + self.radius_amplitude_mm * math.sin(phase + math.pi / 3))
+        # Orientation: precess around world +Z at fixed tilt.
+        tilt_rad = math.radians(self.tilt_deg)
+        precession = phase * self.precession_speed
+        visual.pose = Pose(
+            x=base.pose.x if isinstance(base.pose, Pose) else 0.0,
+            y=base.pose.y if isinstance(base.pose, Pose) else 0.0,
+            z=base.pose.z if isinstance(base.pose, Pose) else 0.0,
+            ox=math.sin(tilt_rad) * math.cos(precession),
+            oy=math.sin(tilt_rad) * math.sin(precession),
+            oz=math.cos(tilt_rad),
+            theta=0.0,
+        )
+        # Color: cycle hue.
+        hue = (t * self.color_speed / self.period_s) % 1.0
+        visual.color = hsv_to_rgb(hue, 1.0, 1.0)
 
 
 @dataclass
@@ -333,6 +464,12 @@ class Trajectory(Animation):
             "duration_s": float(self.duration_s),
             "loop": bool(self.loop),
         }
+
+    def apply(self, visual: Any, base: Any, t: float) -> None:
+        from .anim_helpers import trajectory_pose
+        visual.pose = trajectory_pose(
+            self.waypoints, self.duration_s, t, loop=self.loop,
+        )
 
 
 # Type alias for what Visual.animation accepts.
