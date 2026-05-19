@@ -1,6 +1,6 @@
 # CLAUDE.md — example-visualizations-python
 
-Operational context for future agents working on this repo. Read alongside `README.md` (user-facing), `LESSONS.md` (accumulating findings that feed the tutorial and bug/feature requests for the viz team), and `LIBRARY_PLAN.md` (design for the ViamVizHelpers Python library this module's findings are aimed at).
+Operational context for future agents working on this repo. Read alongside `README.md` (user-facing) and `LESSONS.md` (accumulating findings that feed the tutorial and bug/feature requests for the viz team). The library this module exercises lives in [`viam-labs/viam-viz-helpers-python`](https://github.com/viam-labs/viam-viz-helpers-python) — as of 0.0.40 the example module depends on it via `requirements.txt` and imports `viam_visuals`. `LIBRARY_PLAN.md` is now historical (design doc for the extracted library).
 
 ## What this is
 
@@ -12,6 +12,7 @@ A Viam module that ships **three models** demonstrating different patterns for d
 
 - **GitHub:** `viam-labs/example-visualizations-python`
 - **Registry:** `viam:example-visualizations-python` (was `viam:example-visualizations` through 0.0.37; was `shrews-testing:example-visualizations` through 0.0.6)
+- **Library:** [`viam-labs/viam-viz-helpers-python`](https://github.com/viam-labs/viam-viz-helpers-python) — PyPI name `viam-viz-helpers`, import name `viam_visuals`. Installed from git via `requirements.txt`.
 - **API:** all three models register at the standard Viam APIs above
 - **Target machine for testing:** `visual-playground` (machine ID `9c77b71c-1753-4c30-a326-72b76d6d8ef6`, main part `0eea167b-d96b-4426-a94e-1f605d0d34c4`). Also runs on `desktop-dell-2` (`934a26e4-7b00-455e-a8c6-abe896a003a6`), historical primary.
 
@@ -28,31 +29,22 @@ src/recipes.py          # Recipe protocol + MarchingBoxes + PulsingSpheres + REC
 src/geometries.py       # Pure proto builders: build_box/sphere/capsule/point/mesh/pointcloud, build_metadata, build_pose, stl_to_ply, asset path resolution. Module-specific (uses the playground's primitive-type set).
 src/animation.py        # Per-mode pose math for the 11 standalone-playground animations: none, orbit, oscillate, spin, swing, pulse, trajectory, force_vector, breathe, flicker, lifecycle. Returns (pose, geom, updated_fields, metadata_overrides).
 src/presets.py          # Named scene bundles for standalone-playground.
-
-viam_visuals/           # The typed visualization library (planned ViamVizHelpers). Self-contained; the eventual extraction will preserve this API.
-viam_visuals/__init__.py        # Public API surface — re-exports everything user-facing.
-viam_visuals/pose.py            # Pose dataclass + Pose.at(...) + normalize_pose.
-viam_visuals/color.py           # ColorLike + normalize_color.
-viam_visuals/shapes.py          # Visual base + Box/Sphere/Capsule/Point/Arrow/Mesh/PointCloud.
-viam_visuals/animations.py      # Animation specs (Static/Spin/Swing/Oscillate/Orbit/Pulse/Breathe/Flicker/Lifecycle/ForceVector/Trajectory).
-viam_visuals/composites.py      # Composite base + CoordinateFrame/Line/BoundingBox + Arrow.from_to.
-viam_visuals/scene.py           # Scene class + SceneEvent + events_to_wire helper.
-viam_visuals/service.py         # SceneServiceBase — inheritable WSS service. Owns state, subscribers, tick loop, DoCommand dispatch including apply_events.
-viam_visuals/registry.py        # In-process resource registry (register/lookup/unregister).
-viam_visuals/uuid_strategy.py   # initial_uuid / versioned_uuid / VALID_STRATEGIES.
-viam_visuals/_internal/         # Pure helpers — constants, metadata struct builder, mesh/PCD I/O.
+src/simple_scene_example.py  # Minimal teaching model. Uses library defaults; overrides only build_geometry.
 
 scripts/generate_assets.py  # Regenerates every shipped asset. Pure-math: icosahedron, arrow, torus, teapot, helix PCD. One external source committed at scripts/bunny_source.stl (decimated Stanford bunny).
 assets/                 # Shipped reference geometry — see assets/README.md for provenance.
-tests/                  # pytest. Run from repo root via `make test`. 377 tests as of 0.0.16.
-meta.json               # Module metadata. Lists all three models.
+tests/                  # pytest. Run from repo root via `make test`.
+meta.json               # Module metadata. Lists all four models.
 VERSION                 # Single-line semver. Bump before `make upload` — registry rejects duplicates.
 run.sh                  # viam-server entrypoint. Creates venv, installs deps, exec's `python -m src.main`.
-Makefile                # `make test`, `make assets`, `make module.tar.gz`, `make upload`. The module.tar.gz target lists every Python directory (src/, viam_visuals/, viam_visuals/_internal/) — if you add a package, add it here.
+requirements.txt        # Runtime deps including viam-viz-helpers from git.
+Makefile                # `make test`, `make assets`, `make module.tar.gz`, `make upload`. module.tar.gz packs run.sh, requirements.txt, meta.json, src/, assets/.
 pytest.ini              # asyncio_mode=auto, testpaths=tests.
 LESSONS.md              # Accumulating findings — tricky things we've found, with file:line evidence. Source material for the tutorial, viz-team bugs/features, and helper library.
-LIBRARY_PLAN.md         # Design + status doc for ViamVizHelpers.
+LIBRARY_PLAN.md         # Historical design doc — library now lives in its own repo.
 ```
+
+The `viam_visuals` package itself lives in [`viam-labs/viam-viz-helpers-python`](https://github.com/viam-labs/viam-viz-helpers-python). To iterate on the library against this module locally, clone it as a sibling and `pip install -e ../viam-viz-helpers-python` in this module's venv.
 
 ## Tests
 
@@ -122,7 +114,7 @@ Both patterns subclass `viam_visuals.SceneServiceBase`. The library does all the
 
 `SceneServiceBase._state` is `dict[label: str] -> { item, base_pose, base_geom, uuid, transform, chunks_info, chunked_state, visible_to_viewer }`. The `item` dict is the wire-format item dict (preserved for `snapshot` round-trip). `base_pose` / `base_geom` are the static reference points the animation tick composes onto. `uuid` is the on-wire identifier (matches the label under stable strategy, has a timestamp+counter suffix under versioned). `transform` is the cached `commonpb.Transform` — what subscribers receive on initial-burst and what gets mutated by animation ticks or `apply_events`.
 
-`Scene` (in `viam_visuals/scene.py`) holds a separate `{label: SceneEntry}` map. `SceneEntry` has `visual` (live `Visual` object reference) + `committed` (the wire-format dict snapshot from the last `add`/`update`). `Scene.update(visual)` diffs the new `visual.to_dict()` against `committed` to compute field-mask paths.
+`Scene` (in the published `viam_visuals.scene` module — see [`viam-labs/viam-viz-helpers-python`](https://github.com/viam-labs/viam-viz-helpers-python)) holds a separate `{label: SceneEntry}` map. `SceneEntry` has `visual` (live `Visual` object reference) + `committed` (the wire-format dict snapshot from the last `add`/`update`). `Scene.update(visual)` diffs the new `visual.to_dict()` against `committed` to compute field-mask paths.
 
 ### Animation tick (standalone-playground)
 
@@ -230,6 +222,7 @@ These are the load-bearing facts an agent working in this repo needs to know up 
 
 Current pre-release version sequence (latest first):
 
+- 0.0.40 — library extracted to [`viam-labs/viam-viz-helpers-python`](https://github.com/viam-labs/viam-viz-helpers-python); module installs it via git in `requirements.txt`. Local `viam_visuals/` directory deleted; imports still read `from viam_visuals import ...` because the package name is preserved.
 - 0.0.16 — fix PlaygroundDriver.new not calling reconfigure (EasyResource trap; same as services, applies to Generic too)
 - 0.0.15 — three-model architecture (playground-visualizer + playground-driver + recipes shipped alongside standalone-playground)
 - 0.0.14 — standalone-playground rename + Scene library + in-process registry
