@@ -50,6 +50,8 @@ from viam_visuals import (
     Spin,
     Swing,
     Trajectory,
+    Visual,
+    normalize_pose,
 )
 
 
@@ -94,8 +96,8 @@ PRESET_NAMES = (
 PRIMITIVE_ROW_SPACING_MM = 400.0
 
 
-def _identity_pose(x: float = 0.0, y: float = 0.0, z: float = 0.0) -> Mapping[str, Any]:
-    return {"x": x, "y": y, "z": z, "ox": 0, "oy": 0, "oz": 1, "theta": 0}
+def _identity_pose(x: float = 0.0, y: float = 0.0, z: float = 0.0) -> Pose:
+    return Pose(x=x, y=y, z=z, ox=0.0, oy=0.0, oz=1.0, theta=0.0)
 
 
 def _label_asset_filename(text: str, height_mm: float) -> str:
@@ -111,59 +113,49 @@ def _label_asset_filename(text: str, height_mm: float) -> str:
 _SKIP_LABEL_PATTERNS = ("morph_grid", "_wheel_")
 
 
-def _should_label(item: Mapping[str, Any]) -> bool:
-    """Whether this item gets an auto-generated text-label sibling."""
-    label = item.get("label", "")
+def _should_label(item: Visual) -> bool:
+    """Whether this Visual gets an auto-generated text-label sibling."""
+    label = item.label
     if not label:
         return False
     if any(p in label for p in _SKIP_LABEL_PATTERNS):
         return False
-    # Skip items that are themselves labels (avoid recursion).
     if label.startswith("label_"):
         return False
-    # Only label items that live in the world frame. Items parented
-    # to another emitted Transform follow chain motion that's hard
-    # to mirror with a static label, and the chain's owning entity
-    # is itself labeled.
-    pf = item.get("parent_frame")
+    pf = item.parent_frame
     return pf in (None, "", "world")
 
 
 def _label_for(
-    item: Mapping[str, Any],
+    item: Visual,
     height_mm: float = ITEM_LABEL_HEIGHT_MM,
     z_offset_mm: float = ITEM_LABEL_Z_OFFSET_MM,
-) -> Mapping[str, Any]:
-    """Build a label-mesh item floating below ``item``."""
-    target_label = item["label"]
-    base_pose = item.get("pose") or {}
-    pose = {
-        "x": float(base_pose.get("x", 0.0)),
-        "y": float(base_pose.get("y", 0.0)),
-        "z": float(base_pose.get("z", 0.0)) + z_offset_mm,
-        "ox": 0, "oy": 0, "oz": 1, "theta": 0,
-    }
-    # Deterministic per-label color so the same item always gets
-    # the same swatch. sum-of-ords gives stable distribution
-    # without needing the full hash module.
+) -> Mesh:
+    """Build a Mesh label hovering below ``item``."""
+    target_label = item.label
+    base = normalize_pose(item.pose)
+    pose = Pose(
+        x=float(base["x"]),
+        y=float(base["y"]),
+        z=float(base["z"]) + z_offset_mm,
+        ox=0.0, oy=0.0, oz=1.0, theta=0.0,
+    )
     color = ITEM_LABEL_COLORS[
         sum(ord(c) for c in target_label) % len(ITEM_LABEL_COLORS)
     ]
-    return {
-        "type": "mesh",
-        "label": f"label_{target_label}",
-        "pose": pose,
-        "mesh_path": f"assets/{_label_asset_filename(target_label, height_mm)}",
-        "color": dict(color),
-        "opacity": 1.0,
-        "animation": {"mode": "none"},
-    }
+    return Mesh(
+        label=f"label_{target_label}",
+        pose=pose,
+        mesh_path=f"assets/{_label_asset_filename(target_label, height_mm)}",
+        color=color,
+        opacity=1.0,
+    )
 
 
-def _with_item_labels(items: List[Mapping[str, Any]]) -> List[Mapping[str, Any]]:
-    """Return ``items`` with a label-mesh sibling appended for every
-    world-parented item (per ``_should_label``)."""
-    out = list(items)
+def _with_item_labels(items: List[Visual]) -> List[Visual]:
+    """Return ``items`` with a Mesh label appended for every world-
+    parented Visual (per :func:`_should_label`)."""
+    out: List[Visual] = list(items)
     for it in items:
         if _should_label(it):
             out.append(_label_for(it))
@@ -175,22 +167,20 @@ def _row_label(
     y: float,
     x: float = -2000.0,
     z: float = ROW_LABEL_Z_OFFSET_MM,
-) -> Mapping[str, Any]:
-    """Build a large text-label-mesh item naming a row in ``all``.
+) -> Mesh:
+    """Build a large Mesh label naming a row in :func:`all_preset`.
     Positioned inline with the row's items (same Z plane) at ``x``
     (typically just to the left of the leftmost item in the row)."""
-    return {
-        "type": "mesh",
-        "label": f"label_row_{row_name}",
-        "pose": _identity_pose(x=x, y=y, z=z),
-        "mesh_path": f"assets/{_label_asset_filename(row_name, ROW_LABEL_HEIGHT_MM)}",
-        "color": dict(ROW_LABEL_COLOR),
-        "opacity": 1.0,
-        "animation": {"mode": "none"},
-    }
+    return Mesh(
+        label=f"label_row_{row_name}",
+        pose=_identity_pose(x=x, y=y, z=z),
+        mesh_path=f"assets/{_label_asset_filename(row_name, ROW_LABEL_HEIGHT_MM)}",
+        color=ROW_LABEL_COLOR,
+        opacity=1.0,
+    )
 
 
-def primitives() -> List[Mapping[str, Any]]:
+def primitives() -> List[Visual]:
     """One of every primitive type plus a tour of more complex meshes
     and a point cloud, in a single row along X. Each item has a
     distinct color so they read clearly at a glance.
@@ -298,10 +288,10 @@ def primitives() -> List[Mapping[str, Any]]:
                    pointcloud_path="assets/helix.pcd",
                    opacity=1.0, chunked=True, chunk_size=2000),
     ]
-    return [v.to_dict() for v in visuals]
+    return visuals
 
 
-def color_wheel(count: int = 10, ring_radius_mm: float = 300.0) -> List[Mapping[str, Any]]:
+def color_wheel(count: int = 10, ring_radius_mm: float = 300.0) -> List[Visual]:
     """``count`` spheres around a circle in the XY plane, hue swept
     uniformly through the color wheel. Visually shows what
     ``metadata.color`` accepts."""
@@ -318,10 +308,10 @@ def color_wheel(count: int = 10, ring_radius_mm: float = 300.0) -> List[Mapping[
             color=(int(255 * r), int(255 * g), int(255 * b)),
             opacity=1.0,
         ))
-    return [v.to_dict() for v in visuals]
+    return visuals
 
 
-def robot_arm() -> List[Mapping[str, Any]]:
+def robot_arm() -> List[Visual]:
     """Stylized articulated robot arm built from primitives, chained
     via ``parent_frame``. Demonstrates how a kinematic structure
     naturally falls out of the world-state-store API.
@@ -415,10 +405,10 @@ def robot_arm() -> List[Mapping[str, Any]]:
             color=CLAW_COLOR, opacity=1.0,
             animation=Oscillate(axis="x", amplitude_mm=10.0, period_s=3)),
     ]
-    return [v.to_dict() for v in visuals]
+    return visuals
 
 
-def orientation_vectors() -> List[Mapping[str, Any]]:
+def orientation_vectors() -> List[Visual]:
     """Coordinate frames at axis-aligned orientation vectors.
 
     Each item is a small sphere host carrying ``show_axes_helper:
@@ -460,10 +450,10 @@ def orientation_vectors() -> List[Mapping[str, Any]]:
         # about the orientation vector, not a tilt of it.
         _frame("frame_+Z_theta45", x=2 * sp, ox=0, oy=0, oz=1, theta=45),
     ]
-    return [v.to_dict() for v in visuals]
+    return visuals
 
 
-def reference_frame_demo() -> List[Mapping[str, Any]]:
+def reference_frame_demo() -> List[Visual]:
     """Compose poses through the Viam reference frame system across
     three distinct rotation axes.
 
@@ -541,7 +531,7 @@ def reference_frame_demo() -> List[Mapping[str, Any]]:
         "spinning_frame_wheel_hub", count=10,
         ring_radius_mm=220.0, sphere_radius_mm=24.0,
     ))
-    return [v.to_dict() for v in visuals]
+    return visuals
 
 
 def _color_wheel_visuals(
@@ -578,57 +568,57 @@ def _color_wheel_visuals(
 
 
 def _offset_base_items(
-    items: List[Mapping[str, Any]],
+    items: List[Visual],
     axis: str,
     delta: float,
-) -> List[Mapping[str, Any]]:
-    """Translate "base" items (those whose ``parent_frame`` is unset
-    or ``"world"``) along ``axis`` by ``delta``. Items parented to
+) -> List[Visual]:
+    """Translate "base" Visuals (those whose ``parent_frame`` is unset
+    or ``"world"``) along ``axis`` by ``delta``. Visuals parented to
     another emitted Transform are left alone — they inherit the
-    offset through the frame chain (if the renderer composes through
-    chained parents). Used by combined presets so the included
-    sub-presets don't overlap visually.
+    offset through the frame chain.
 
-    For trajectory animations, the waypoint coordinates inside
-    ``animation.waypoints`` are shifted too — otherwise the runner
-    would walk an un-shifted path while its static base pose was
-    translated to a different location, leaving the line and markers
-    disconnected from the actual motion.
+    For ``Trajectory`` animations, the waypoint coordinates are
+    shifted too — otherwise the runner would walk an un-shifted path
+    while its static base pose was translated to a different
+    location.
     """
     if axis not in ("x", "y", "z"):
         raise ValueError(f"axis must be x|y|z, got {axis!r}")
-    out: List[Mapping[str, Any]] = []
+    out: List[Visual] = []
     for it in items:
-        pf = it.get("parent_frame")
-        new_it = dict(it)
-        if pf in (None, "", "world"):
-            new_pose = dict(it.get("pose") or {})
-            new_pose[axis] = float(new_pose.get(axis, 0.0)) + delta
-            new_it["pose"] = new_pose
-            anim = it.get("animation") or {}
-            if (
-                anim.get("mode") == "trajectory"
-                and isinstance(anim.get("waypoints"), list)
-            ):
-                new_anim = dict(anim)
-                new_anim["waypoints"] = [
-                    {**wp, axis: float(wp.get(axis, 0.0)) + delta}
-                    for wp in anim["waypoints"]
-                ]
-                new_it["animation"] = new_anim
-        out.append(new_it)
+        if it.parent_frame in (None, "", "world"):
+            base = normalize_pose(it.pose)
+            new_pose = Pose(
+                x=float(base["x"]) + (delta if axis == "x" else 0.0),
+                y=float(base["y"]) + (delta if axis == "y" else 0.0),
+                z=float(base["z"]) + (delta if axis == "z" else 0.0),
+                ox=float(base["ox"]), oy=float(base["oy"]),
+                oz=float(base["oz"]), theta=float(base["theta"]),
+            )
+            it.pose = new_pose
+            # Shift Trajectory waypoints in lockstep.
+            if isinstance(it.animation, Trajectory):
+                shifted: List[Any] = []
+                for wp in it.animation.waypoints:
+                    wp_d = normalize_pose(wp)
+                    shifted_wp = dict(wp_d)
+                    shifted_wp[axis] = float(wp_d.get(axis, 0.0)) + delta
+                    shifted.append(shifted_wp)
+                it.animation = Trajectory(
+                    waypoints=shifted,
+                    duration_s=it.animation.duration_s,
+                    loop=it.animation.loop,
+                )
+        out.append(it)
     return out
 
 
-def _offset_base_items_y(
-    items: List[Mapping[str, Any]],
-    dy: float,
-) -> List[Mapping[str, Any]]:
+def _offset_base_items_y(items: List[Visual], dy: float) -> List[Visual]:
     """Backward-compatible alias — delegates to _offset_base_items."""
     return _offset_base_items(items, "y", dy)
 
 
-def frame_composition() -> List[Mapping[str, Any]]:
+def frame_composition() -> List[Visual]:
     """Two demonstrations of chained ``parent_frame`` composition in
     one row: a spinning frame triad on the left, an articulated robot
     arm on the right. Both depend on the same renderer behavior — a
@@ -644,13 +634,13 @@ def frame_composition() -> List[Mapping[str, Any]]:
         + elbow + forearm + wrist + end-effector arrow, kinematic
         chain driven by the spinning base and elbow)
     """
-    items: List[Mapping[str, Any]] = []
+    items: List[Visual] = []
     items.extend(_offset_base_items(reference_frame_demo(), "x", -1000.0))
     items.extend(_offset_base_items(robot_arm(), "x", 1000.0))
     return items
 
 
-def all_preset() -> List[Mapping[str, Any]]:
+def all_preset() -> List[Visual]:
     """Every other preset, stacked along Y at ~1.2 m intervals so they
     don't visually collide. Load this once and you've seen every
     primitive, color, orientation convention, the chained-frame
@@ -682,7 +672,7 @@ def all_preset() -> List[Mapping[str, Any]]:
     """
     row = 500.0
     arm_gap = 1500.0
-    items: List[Mapping[str, Any]] = []
+    items: List[Visual] = []
     # Each sub-preset gets item labels (per-item text floating above
     # the geometry) before it's offset into its row. Item-labels
     # follow the same Y offset as their target item.
@@ -716,7 +706,7 @@ def all_preset() -> List[Mapping[str, Any]]:
     return items
 
 
-def trajectory_preview() -> List[Mapping[str, Any]]:
+def trajectory_preview() -> List[Visual]:
     """Visualize a multi-waypoint trajectory in the 3D scene:
 
       - a thin blue line drawn as a chain of capsules connecting the
@@ -778,10 +768,10 @@ def trajectory_preview() -> List[Mapping[str, Any]]:
         animation=Trajectory(waypoints=[dict(wp) for wp in waypoints],
                              duration_s=12.0, loop=True),
     ))
-    return [v.to_dict() for v in visuals]
+    return visuals
 
 
-def geometry_morph() -> List[Mapping[str, Any]]:
+def geometry_morph() -> List[Visual]:
     """A row of items demonstrating geometry + metadata animation
     that goes beyond pose:
 
@@ -856,10 +846,10 @@ def geometry_morph() -> List[Mapping[str, Any]]:
     _add_grid("morph_grid_broken", broken_origin_x, (230, 60, 60),
               rotate_uuid=False)
 
-    return [v.to_dict() for v in visuals]
+    return visuals
 
 
-def force_vector_demo() -> List[Mapping[str, Any]]:
+def force_vector_demo() -> List[Visual]:
     """A virtual force vector at the origin — one ``arrow`` primitive
     with the ``force_vector`` animation mode driving all four visible
     attributes simultaneously:
@@ -885,11 +875,11 @@ def force_vector_demo() -> List[Mapping[str, Any]]:
                                     radius_amplitude_mm=5,
                                     tilt_deg=45,
                                     precession_speed=1.0,
-                                    color_speed=0.7)).to_dict()
+                                    color_speed=0.7))
     ]
 
 
-def lifecycle_demo() -> List[Mapping[str, Any]]:
+def lifecycle_demo() -> List[Visual]:
     """A row of entities cycling through the official worldstatestore
     lifecycle color convention: blue / 50% opacity (appearing) →
     orange / 100% (alive) → red / 50% (disappearing) → absent (gone).
@@ -927,10 +917,10 @@ def lifecycle_demo() -> List[Mapping[str, Any]]:
                                 disappear_s=disappear_s, gone_s=gone_s,
                                 phase_offset_s=offset_s),
         ))
-    return [v.to_dict() for v in visuals]
+    return visuals
 
 
-def chunked_pcd_demo() -> List[Mapping[str, Any]]:
+def chunked_pcd_demo() -> List[Visual]:
     """Standalone demo for the chunked-delivery pathway.
 
     Ships the helix with `chunked: true` and a small chunk size so
@@ -948,7 +938,7 @@ def chunked_pcd_demo() -> List[Mapping[str, Any]]:
     return [
         PointCloud("chunked_helix", pose=Pose.identity(),
                    pointcloud_path="assets/helix.pcd",
-                   opacity=1.0, chunked=True, chunk_size=2000).to_dict()
+                   opacity=1.0, chunked=True, chunk_size=2000)
     ]
 
 
@@ -1005,7 +995,11 @@ PRESETS = {
 }
 
 
-def load(name: str) -> List[Mapping[str, Any]]:
+def load(name: str) -> List[Visual]:
+    """Return the named preset's Visuals. Subclasses of
+    :class:`viam_visuals.SceneServiceBase` typically call this from
+    their ``reconfigure`` and forward the result to
+    :meth:`SceneServiceBase.set_scene`."""
     fn = PRESETS.get(name)
     if fn is None:
         raise ValueError(

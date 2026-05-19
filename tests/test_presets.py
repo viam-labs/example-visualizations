@@ -1,4 +1,12 @@
-"""Tests for src/presets.py — the named scene bundles."""
+"""Tests for src/presets.py — the named scene bundles.
+
+The presets module now returns typed Visual objects (post phase-4
+migration). These tests check the wire-format dict shape via
+``.to_dict()``; we wrap each preset call so the existing assertions
+keep working without rewriting ~50 tests against the Visual API.
+The semantic contract under test (item types, labels, poses,
+animation specs) is unchanged.
+"""
 import math
 
 import pytest
@@ -7,18 +15,70 @@ from src.animation import SUPPORTED_AXES, SUPPORTED_MODES
 from src.geometries import SUPPORTED_TYPES
 from src.presets import (
     PRESET_NAMES,
-    PRESETS,
-    primitives,
-    color_wheel,
-    force_vector_demo,
-    frame_composition,
-    geometry_morph,
-    load,
-    orientation_vectors,
-    reference_frame_demo,
-    robot_arm,
-    trajectory_preview,
+    PRESETS as _PRESETS_VISUALS,
+    primitives as _primitives,
+    color_wheel as _color_wheel,
+    force_vector_demo as _force_vector_demo,
+    frame_composition as _frame_composition,
+    geometry_morph as _geometry_morph,
+    load as _load,
+    orientation_vectors as _orientation_vectors,
+    reference_frame_demo as _reference_frame_demo,
+    robot_arm as _robot_arm,
+    trajectory_preview as _trajectory_preview,
 )
+
+
+def _dicts(visuals):
+    """Convert a List[Visual] to List[dict] — wire-format shape."""
+    return [v.to_dict() for v in visuals]
+
+
+# Wire-format-shape wrappers — tests assert against the dict
+# representation rather than the Visual class surface.
+def primitives():
+    return _dicts(_primitives())
+
+
+def color_wheel(*args, **kwargs):
+    return _dicts(_color_wheel(*args, **kwargs))
+
+
+def force_vector_demo():
+    return _dicts(_force_vector_demo())
+
+
+def frame_composition():
+    return _dicts(_frame_composition())
+
+
+def geometry_morph():
+    return _dicts(_geometry_morph())
+
+
+def load(name):
+    return _dicts(_load(name))
+
+
+def orientation_vectors():
+    return _dicts(_orientation_vectors())
+
+
+def reference_frame_demo():
+    return _dicts(_reference_frame_demo())
+
+
+def robot_arm():
+    return _dicts(_robot_arm())
+
+
+def trajectory_preview():
+    return _dicts(_trajectory_preview())
+
+
+# PRESETS map (for the parameterized "every preset has required
+# fields" test). Wraps each entry so callers get dicts.
+PRESETS = {name: (lambda fn=fn: _dicts(fn())) for name, fn in _PRESETS_VISUALS.items()}
 
 
 # ---------- primitives ----------

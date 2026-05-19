@@ -1,25 +1,34 @@
-"""``playground`` — a WorldStateStore service that publishes a
-configurable set of primitives to the Viam 3D scene viewer.
+"""``standalone-playground`` — a WorldStateStore service that publishes
+a configurable set of primitives to the Viam 3D scene viewer.
 
 Thin subclass over :class:`viam_visuals.SceneServiceBase`. The
 library owns the state map, subscriber fanout, animation tick task,
-UUID strategy, EasyResource.new quirk, and the standard nine
-DoCommand verbs. This module just plugs in:
+UUID strategy, EasyResource.new quirk, and the standard DoCommand
+verbs. This module plugs in:
 
   * the playground's :class:`MODEL`
   * geometry building for the module's primitive types (including
     the ``arrow`` sugar primitive and the ``raw_stl`` bug-demo knob)
   * asset reading from the installed module directory
-  * the per-mode animation tick (delegated to :mod:`src.animation`)
-  * preset lookup (delegated to :mod:`src.presets`)
-  * extra item-level validation
+  * preset-driven scene installation (via the typed-Visual API:
+    :func:`presets_mod.load` returns ``List[Visual]``, fed to
+    :meth:`SceneServiceBase.set_scene`)
+  * extra item-level validation for the legacy items-config path
   * the playground-specific ``get_entity_chunk`` DoCommand verb
+
+Animation dispatch is automatic for preset-installed Visuals — the
+default :meth:`SceneServiceBase.scene_tick` calls each Visual's
+``animation.apply(...)`` at tick rate. The legacy ``compute_tick``
+hook is kept only for the items-config code path (where items
+arrive as wire-format dicts that don't carry typed Animation specs).
 """
 from pathlib import Path
 from typing import Any, List, Mapping, Optional, Sequence, Tuple
 
 from viam.proto.app.robot import ComponentConfig
 from viam.proto.common import Geometry
+from viam.proto.common import ResourceName
+from viam.resource.base import ResourceBase
 from viam.resource.easy_resource import EasyResource
 from viam.resource.types import Model, ModelFamily
 from viam.utils import ValueTypes, struct_to_dict
@@ -99,6 +108,13 @@ class SceneSprites(SceneServiceBase, EasyResource):
     def read_asset(self, asset_path: str) -> bytes:
         return geometries.read_asset(asset_path, MODULE_DIR)
 
+    # ------------------------------------------------------------------
+    # Legacy compute_tick path — kept only for the items-config code
+    # path (where items arrive as wire-format dicts that don't carry
+    # typed Animation specs). The preset path uses the library's
+    # default scene_tick which dispatches via Animation.apply.
+    # ------------------------------------------------------------------
+
     def compute_tick(self, item, base_pose, base_geom, t):
         return anim_mod.compute_tick(item, base_pose, base_geom, t)
 
@@ -106,11 +122,66 @@ class SceneSprites(SceneServiceBase, EasyResource):
         return anim_mod.is_animated(item)
 
     # ------------------------------------------------------------------
+    # Reconfigure: preset → typed Visuals via set_scene; items-config
+    # → legacy reconfigure_with(dicts).
+    # ------------------------------------------------------------------
+
+    def reconfigure(
+        self,
+        config: ComponentConfig,
+        dependencies: Mapping[ResourceName, ResourceBase],
+    ) -> None:
+        attrs = struct_to_dict(config.attributes) if config.attributes else {}
+        tick_hz = attrs.get("tick_hz")
+        uuid_strategy = attrs.get("uuid_strategy")
+        parent_frame = attrs.get("parent_frame")
+
+        # Items config takes precedence over preset (matches the
+        # legacy SceneServiceBase.reconfigure semantics). Items come
+        # as wire-format dicts — keep the legacy reconfigure_with
+        # path for them, and compute_tick will drive any declarative
+        # animation specs they carry.
+        raw_items = attrs.get(ATTR_ITEMS)
+        if raw_items:
+            items = [dict(it) for it in raw_items]
+            self.reconfigure_with(
+                items,
+                tick_hz=tick_hz, uuid_strategy=uuid_strategy,
+                parent_frame=parent_frame,
+            )
+            return
+
+        # No items config → load preset (or default) as typed Visuals,
+        # install via set_scene. Animation dispatch happens via the
+        # library's default scene_tick → Animation.apply chain.
+        #
+        # If both the attribute AND the DEFAULT_PRESET are None (the
+        # playground-visualizer case), install an empty scene — the
+        # visualizer accepts mutations later via apply_events.
+        preset_name = attrs.get(ATTR_PRESET, self.DEFAULT_PRESET)
+        if preset_name is None or str(preset_name) == "":
+            self.set_scene(
+                tick_hz=tick_hz, uuid_strategy=uuid_strategy,
+                parent_frame=parent_frame,
+            )
+            return
+        visuals = list(presets_mod.load(str(preset_name)))
+        self.set_scene(
+            *visuals,
+            tick_hz=tick_hz, uuid_strategy=uuid_strategy,
+            parent_frame=parent_frame,
+        )
+
+    # ------------------------------------------------------------------
     # Optional hooks
     # ------------------------------------------------------------------
 
     def load_preset(self, name: str) -> Sequence[Mapping[str, Any]]:
-        return presets_mod.load(name)
+        """Wire-format adapter for the library's ``preset`` DoCommand
+        verb. The verb calls into reconfigure_with(items) (legacy
+        path); the typed-Visual preset path is used by our
+        :meth:`reconfigure` instead. Returns dicts."""
+        return [v.to_dict() for v in presets_mod.load(name)]
 
     def preset_names(self) -> Sequence[str]:
         return presets_mod.PRESET_NAMES
