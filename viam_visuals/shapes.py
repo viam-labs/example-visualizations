@@ -30,6 +30,7 @@ __all__ = [
     "Sphere",
     "Capsule",
     "Point",
+    "Frame",
     "Arrow",
     "Mesh",
     "PointCloud",
@@ -182,6 +183,45 @@ class Point(Visual):
     """
 
     _TYPE: str = field(default="point", repr=False, init=False)
+
+
+@dataclass
+class Frame(Visual):
+    """A pure transform anchor — a reference frame other Visuals can
+    parent to without rendering anything visible itself.
+
+    Use it to declare hierarchy: place a Frame at the position you
+    want to be the "joint" or "pivot", then give other Visuals
+    ``parent_frame=<frame.label>``. Moving the Frame transports the
+    children with it; the renderer composes the parent transform
+    automatically.
+
+    Internally a tiny sphere with ``invisible=True``. Set
+    ``show_axes_helper=True`` (the default for Frame) to debug
+    orientation; set ``invisible=False`` to render the anchor
+    sphere itself.
+
+    Example::
+
+        pivot = viz.Frame("pivot", pose=viz.Pose.at(x=500, z=300))
+        child = viz.Box(
+            "child", pose=viz.Pose.at(x=80),  # 80mm right of pivot
+            parent_frame="pivot",
+        )
+        # Rotate the pivot; the child rotates with it:
+        pivot.pose = viz.Pose.at(x=500, z=300, theta=45)
+        return scene.update(pivot)  # child follows automatically
+    """
+
+    invisible: bool = True
+    show_axes_helper: bool = True
+
+    _TYPE: str = field(default="sphere", repr=False, init=False)
+
+    def _shape_fields(self) -> Mapping[str, Any]:
+        # Tiny sphere — invisible by default so the anchor doesn't
+        # show, but the axes helper still renders if enabled.
+        return {"radius_mm": 1.0}
 
 
 @dataclass

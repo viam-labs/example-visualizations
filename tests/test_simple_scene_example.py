@@ -26,15 +26,37 @@ def _bare_service():
     return s
 
 
-def test_reconfigure_installs_four_items():
+def test_reconfigure_installs_all_items():
     s = _bare_service()
     s.reconfigure(_stub_config(), {})
-    assert set(s.scene.labels()) == {
-        "demo_box", "demo_sphere", "demo_capsule", "moving_box",
+    expected = {
+        "demo_box", "demo_sphere", "demo_capsule",  # statics
+        "moving_box",                                # 4-channel animated
+        "pivot", "pivot_child_sphere", "pivot_child_box",  # hierarchical
     }
-    assert set(s._state.keys()) == {
-        "demo_box", "demo_sphere", "demo_capsule", "moving_box",
-    }
+    assert set(s.scene.labels()) == expected
+    assert set(s._state.keys()) == expected
+
+
+def test_pivot_children_use_pivot_as_parent_frame():
+    s = _bare_service()
+    s.reconfigure(_stub_config(), {})
+    for label in ("pivot_child_sphere", "pivot_child_box"):
+        item = s._state[label]["item"]
+        assert item["parent_frame"] == "pivot", (
+            f"{label} should be parented to 'pivot', got "
+            f"{item.get('parent_frame')!r}")
+
+
+def test_scene_tick_rotates_pivot():
+    s = _bare_service()
+    s.reconfigure(_stub_config(), {})
+    events = list(s.scene_tick(s.scene, 1.0))
+    pivot_events = [e for e in events if e.label == "pivot"]
+    assert len(pivot_events) >= 1
+    # theta should have changed (60 deg/sec * 1s = 60°).
+    pivot = s.scene.get("pivot")
+    assert abs(pivot.pose.theta - 60.0) < 1e-6
 
 
 def test_reconfigure_static_items_have_distinct_types():

@@ -96,6 +96,29 @@ class SimpleSceneExample(viz.SceneServiceBase):
             color=(255, 100, 0),
             opacity=1.0,
         )
+        # Hierarchical layer: a pivot Frame with two children parented
+        # to it. Rotating the pivot transports the children — they
+        # don't need their own updates. The Frame is an invisible
+        # anchor; show_axes_helper=True is the default so the pivot's
+        # orientation is visible.
+        self.pivot: viz.Frame = viz.Frame(
+            label="pivot",
+            pose=viz.Pose.at(x=-700, y=0, z=300),
+        )
+        self.child_sphere: viz.Sphere = viz.Sphere(
+            label="pivot_child_sphere",
+            pose=viz.Pose.at(x=80, y=0, z=0),  # 80mm along pivot's +X
+            parent_frame="pivot",
+            radius_mm=30,
+            color=(255, 255, 0),  # yellow
+        )
+        self.child_box: viz.Box = viz.Box(
+            label="pivot_child_box",
+            pose=viz.Pose.at(x=-80, y=0, z=0),  # 80mm along pivot's -X
+            parent_frame="pivot",
+            dims_mm=(40, 40, 40),
+            color=(255, 0, 255),  # magenta
+        )
 
     # ---- Framework entry points ---------------------------------------
 
@@ -126,6 +149,7 @@ class SimpleSceneExample(viz.SceneServiceBase):
         """Install the scene with typed Visual objects. The library
         broadcasts ADDED for each item and starts the tick task."""
         self.set_scene(
+            # Three static primitives in a row.
             viz.Box(
                 "demo_box",
                 pose=viz.Pose.at(x=-400, y=0, z=100),
@@ -145,7 +169,13 @@ class SimpleSceneExample(viz.SceneServiceBase):
                 length_mm=200,
                 color=(0, 130, 200),  # blue
             ),
+            # The animated box (mutated in scene_tick).
             self.moving_box,
+            # Hierarchical group: pivot + two children. Only the
+            # pivot's pose updates each tick; the children follow.
+            self.pivot,
+            self.child_sphere,
+            self.child_box,
         )
 
     # ---- Library hooks ------------------------------------------------
@@ -180,6 +210,7 @@ class SimpleSceneExample(viz.SceneServiceBase):
           * **Opacity**: sinusoidal between 0.3 and 1.0, period 3 s.
             Same library-side translation as color.
         """
+        # --- Moving box: four animations on one Visual --------------
         # Position: orbit around the box's anchor at (400, 0, 200).
         self.moving_box.pose = viz.Pose.at(
             x=400 + 150 * math.cos(2 * math.pi * t / 4),
@@ -193,7 +224,21 @@ class SimpleSceneExample(viz.SceneServiceBase):
         self.moving_box.color = viz.hsv_to_rgb((t / 6) % 1.0)
         # Opacity: pulse between 0.3 and 1.0.
         self.moving_box.opacity = 0.3 + 0.7 * (1 + math.sin(2 * math.pi * t / 3)) / 2
-        return scene.update(self.moving_box)
+
+        # --- Hierarchical group: only the pivot updates -------------
+        # Rotate the pivot around its own +Z. The two children are
+        # parented to "pivot" via parent_frame; the renderer composes
+        # the parent transform automatically, so they orbit around
+        # the pivot without needing their own per-tick updates.
+        self.pivot.pose = viz.Pose.at(
+            x=-700, y=0, z=300,
+            theta=(t * 60) % 360,  # 60° per second
+        )
+
+        events = []
+        events.extend(scene.update(self.moving_box))
+        events.extend(scene.update(self.pivot))
+        return events
 
 
 # Register the model with the Viam SDK at import time. The Module

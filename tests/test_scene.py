@@ -116,6 +116,23 @@ def test_update_no_change_yields_no_event():
     assert events == []
 
 
+def test_update_parent_frame_change_yields_respawn_signal():
+    # parent_frame is not honored on UPDATED — the renderer reads
+    # PoseInObserverFrame.reference_frame at spawn time. Treat it
+    # like a metadata change: emit UPDATED with empty paths so the
+    # service-side respawn intercept (REMOVE + re-ADD with fresh
+    # UUID) re-anchors the entity at the renderer.
+    s = Scene()
+    b = Box("b", dims_mm=(100, 100, 100))
+    s.add(b)
+    b.parent_frame = "new_parent"
+    events = s.update(b)
+    assert len(events) == 1
+    assert events[0].kind == "updated"
+    assert events[0].paths == []
+    assert events[0].item_dict["parent_frame"] == "new_parent"
+
+
 def test_update_no_changes_returns_empty_list():
     s = Scene()
     b = Box("b", dims_mm=(100, 100, 100))
