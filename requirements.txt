@@ -1,3 +1,4 @@
 viam-sdk
 numpy
 typing-extensions
+viam-viz-helpers @ git+https://github.com/viam-labs/viam-viz-helpers-python.git@main
