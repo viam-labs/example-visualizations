@@ -220,10 +220,15 @@ class SimpleSceneExample(viz.SceneServiceBase):
         # Scale: pulse all three dimensions symmetrically.
         scale = 80 + 80 * (1 + math.sin(2 * math.pi * t / 2)) / 2
         self.moving_box.dims_mm = (scale, scale, scale)
-        # Color: cycle hue at full saturation / value.
-        self.moving_box.color = viz.hsv_to_rgb((t / 6) % 1.0)
-        # Opacity: pulse between 0.3 and 1.0.
-        self.moving_box.opacity = 0.3 + 0.7 * (1 + math.sin(2 * math.pi * t / 3)) / 2
+        # Color and opacity trigger renderer respawns (the viewer
+        # drops metadata.* paths on UPDATED, so the library emits
+        # REMOVE + re-ADD with a fresh UUID). Snap to bounded step
+        # counts so the respawn rate doesn't pin to tick_hz; see
+        # viam_visuals.snap_step.
+        hue = viz.snap_step((t / 6) % 1.0, 24)             # 24 hues / 6 s
+        self.moving_box.color = viz.hsv_to_rgb(hue)
+        op_raw = 0.3 + 0.7 * (1 + math.sin(2 * math.pi * t / 3)) / 2
+        self.moving_box.opacity = viz.snap_step(op_raw, 12, lo=0.3, hi=1.0)
 
         # --- Hierarchical group: only the pivot updates -------------
         # Rotate the pivot around its own +Z. The two children are

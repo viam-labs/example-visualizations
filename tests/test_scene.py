@@ -321,7 +321,14 @@ def test_parent_frame_custom():
 # ---- BoundingBox round-trip --------------------------------------------
 
 def test_bounding_box_updates_pose_via_object_mutation():
-    """The headline use case — bbox.pose = new_pose; scene.update(bbox)."""
+    """The headline use case — bbox.pose = new_pose; scene.update(bbox).
+
+    When pose AND metadata (color) both change, Scene escalates to
+    the respawn signal (paths=[]) — emitting an UPDATED with the
+    pose paths would visibly lose the color change at the renderer.
+    The consumer-side respawn (REMOVE + re-ADD with fresh UUID)
+    carries both the new pose and the new color in one go.
+    """
     s = Scene()
     bbox = BoundingBox("obj_a", dims_mm=(100, 200, 50), color=(255, 0, 0))
     s.add(bbox)
@@ -333,10 +340,27 @@ def test_bounding_box_updates_pose_via_object_mutation():
     assert len(events) == 1
     assert events[0].kind == UPDATED
     assert events[0].label == "obj_a"
+    # Respawn signal: empty paths. The committed snapshot reflects
+    # both changes; the SceneServiceBase intercept materializes them
+    # as REMOVE + re-ADD with a fresh UUID at the renderer.
+    assert events[0].paths == []
+    assert events[0].item_dict["pose"]["x"] == 500
+    assert events[0].item_dict["color"] == {"r": 0, "g": 255, "b": 0}
+
+
+def test_bounding_box_pose_only_update_emits_pose_paths():
+    """When only pose changes (no metadata touched), Scene emits a
+    standard UPDATED with pose paths — no respawn needed."""
+    s = Scene()
+    bbox = BoundingBox("obj_b", dims_mm=(100, 200, 50), color=(255, 0, 0))
+    s.add(bbox)
+
+    bbox.pose = Pose.at(x=500, y=-200, z=100)
+    events = s.update(bbox)
+
+    assert len(events) == 1
+    assert events[0].kind == UPDATED
     paths = set(events[0].paths)
     assert "poseInObserverFrame.pose.x" in paths
     assert "poseInObserverFrame.pose.y" in paths
     assert "poseInObserverFrame.pose.z" in paths
-    # Color change is intentionally NOT in paths — the renderer
-    # doesn't honor metadata.* updates, so emitting them would be
-    # wire noise. The Scene's committed snapshot still updates.

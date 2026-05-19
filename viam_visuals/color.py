@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Mapping, Optional, Tuple, Union
 
 
-__all__ = ["ColorLike", "hsv_to_rgb", "normalize_color"]
+__all__ = ["ColorLike", "hsv_to_rgb", "normalize_color", "snap_step"]
 
 
 ColorLike = Union[None, Mapping[str, int], Tuple[int, int, int]]
@@ -69,3 +69,38 @@ def hsv_to_rgb(h: float, s: float = 1.0, v: float = 1.0) -> Tuple[int, int, int]
     else:
         r, g, b = v, p, q
     return int(r * 255), int(g * 255), int(b * 255)
+
+
+def snap_step(value: float, n_steps: int, lo: float = 0.0, hi: float = 1.0) -> float:
+    """Quantize ``value`` (in ``[lo, hi]``) to one of ``n_steps``
+    discrete values.
+
+    Use when mutating renderer-respawn-triggering fields (color,
+    opacity, parent_frame, show_axes_helper, invisible) in a
+    high-rate tick loop. The respawn intercept fires once per
+    distinct value of the snapped output, so snapping bounds the
+    wire-level REMOVE+ADD churn (and the renderer's REMOVED-UUID
+    cache growth) to ``n_steps`` events per cycle instead of one
+    per tick.
+
+    Example — cycle hue through 16 steps per 6-second cycle::
+
+        hue_step = viz.snap_step((t / 6.0) % 1.0, 16)
+        self.moving_box.color = viz.hsv_to_rgb(hue_step)
+        return scene.update(self.moving_box)
+
+    With ``n_steps=16`` and a 6 s cycle, scene.update emits at most
+    16 respawn events per 6 s (≈ 2.7 Hz) regardless of the tick
+    rate. Calls within the same step produce no event.
+    """
+    if n_steps <= 0:
+        raise ValueError(f"n_steps must be positive, got {n_steps}")
+    if hi <= lo:
+        raise ValueError(f"hi must be > lo, got hi={hi} lo={lo}")
+    # Clamp into [lo, hi], scale to [0, n_steps), snap to step index.
+    span = hi - lo
+    u = max(0.0, min(1.0, (value - lo) / span))
+    step = int(u * n_steps)
+    if step >= n_steps:
+        step = n_steps - 1
+    return lo + (step / n_steps) * span

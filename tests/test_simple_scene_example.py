@@ -77,15 +77,20 @@ def test_scene_tick_returns_events_for_moving_box():
     assert events[0].kind == "updated"
 
 
-def test_scene_tick_emits_pose_and_dim_paths():
+def test_scene_tick_emits_respawn_for_moving_box():
+    # Moving box mutates color + opacity every step in addition to
+    # pose + dims. Since metadata changes are involved, Scene
+    # escalates the event to the respawn signal (paths=[]).
+    # SceneServiceBase materializes the respawn as REMOVE + ADD
+    # with fresh UUID — carrying the new pose AND new color in one
+    # event sequence.
     s = _bare_service()
     s.reconfigure(_stub_config(), {})
     events = list(s.scene_tick(s.scene, 0.5))
-    paths = events[0].paths
-    # Pose should have changed: at least one pose path emitted.
-    assert any(p.startswith("poseInObserverFrame.pose") for p in paths)
-    # Scale should have changed: at least one dims path emitted.
-    assert any("dimsMm" in p for p in paths)
+    moving_events = [e for e in events if e.label == "moving_box"]
+    assert len(moving_events) == 1
+    assert moving_events[0].kind == "updated"
+    assert moving_events[0].paths == []
 
 
 def test_scene_tick_at_t_zero_still_emits_for_color_change():

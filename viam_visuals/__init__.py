@@ -48,7 +48,7 @@ from .animations import (
     Trajectory,
     normalize_animation,
 )
-from .color import ColorLike, hsv_to_rgb, normalize_color
+from .color import ColorLike, hsv_to_rgb, normalize_color, snap_step
 from .composites import (
     BoundingBox,
     Composite,
@@ -117,6 +117,7 @@ __all__ = [
     "ColorLike",
     "AnimationLike",
     "hsv_to_rgb",
+    "snap_step",
     "normalize_pose",
     "normalize_color",
     "normalize_animation",

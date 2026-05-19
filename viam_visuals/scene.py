@@ -269,6 +269,18 @@ class Scene:
             if new_dict == entry.committed:
                 continue  # No change at all.
             paths = _diff_paths(entry.committed, new_dict)
+            # Respawn (empty Paths) wins over UPDATED when both kinds
+            # of change happen simultaneously. The renderer drops
+            # metadata.* / parent_frame on UPDATED, so emitting paths
+            # here would visibly lose the metadata change. The
+            # consumer-side respawn carries the new pose + new
+            # geometry + new metadata in a single REMOVE + re-ADD,
+            # losing nothing. Cost: a respawn is heavier on the wire
+            # than an UPDATED, so callers mutating metadata at high
+            # tick rates should snap to discrete steps (see
+            # ``viam_visuals.snap_step``).
+            if _requires_respawn(entry.committed, new_dict):
+                paths = []
             entry.committed = new_dict
             entry.visual = v
             out.append(SceneEvent(
@@ -395,6 +407,22 @@ def events_to_wire(events: Sequence[SceneEvent]) -> List[Dict[str, Any]]:
             rec["paths"] = list(e.paths)
         out.append(rec)
     return out
+
+
+def _requires_respawn(old: Mapping[str, Any], new: Mapping[str, Any]) -> bool:
+    """True if the change between two wire-format item dicts touches
+    any field the renderer reads only at spawn time (not on UPDATED):
+    color, opacity, show_axes_helper, invisible, parent_frame.
+
+    Used by :meth:`Scene.update` to escalate an UPDATED into the
+    respawn signal (empty ``paths``) — losing those metadata
+    changes by emitting a renderer-honored UPDATED instead would be
+    a silent bug.
+    """
+    for k in ("color", "opacity", "show_axes_helper", "invisible", "parent_frame"):
+        if old.get(k) != new.get(k):
+            return True
+    return False
 
 
 def _diff_paths(
