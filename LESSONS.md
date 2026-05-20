@@ -109,11 +109,11 @@ The RDK fake at `services/worldstatestore/fake/moving_geos_world.go` uses the ob
 
 ### frame-chaining
 
-**Symptom.** Untested. Neither the RDK fake nor apriltag-tracker emits a Transform whose `pose_in_observer_frame.reference_frame` matches another emitted Transform's `reference_frame`. They always parent to known machine-config frames (`"world"`, `camera.name`).
+**Finding.** Chained-frame composition works in the world-state-store stream — a Transform whose `pose_in_observer_frame.reference_frame` names another emitted Transform's label inherits that parent's pose, and the renderer composes the chain automatically. Neither the RDK fake nor apriltag-tracker exercises this (they only parent to known machine-config frames like `"world"` / `camera.name`), but the playground proves it.
 
-**Why it might matter.** The `reference_frame_demo` preset is the first place to verify that the viewer composes through chained frames in the world-state-store stream. If composition works, complex relative motion is easy to express. If not, modules have to compose poses themselves before emitting.
+**Evidence.** The `frame_composition` and `reference_frame_demo` presets, the `robotArm` preset (a 9-link kinematic chain via `parent_frame`), and the `CoordinateFrame` composite (anchor sphere + three axis arrows parented to the anchor — a single Spin on the anchor sweeps the entire triad as one rigid body). All visible on `desktop-dell-2` and `visual-playground` since 0.0.3.
 
-**Status.** TBD. User will report what they see on `desktop-dell-2` after switching to the `reference_frame_demo` preset.
+**How to apply.** Set `parent_frame=<other-label>` on any Visual to inherit that label's pose. Animations on the parent transport children automatically. Use `viam_visuals.Frame` (invisible-anchor sphere) when you want a pure transform anchor with no rendered body.
 
 ### three-tiers-of-primitive
 
@@ -586,7 +586,7 @@ Related: `validate_config` must return `Tuple[Sequence[str], Sequence[str]]` —
 
 **Solution.** A module-local registry keyed by resource name. The upstream calls `register(self.name, self)` in `reconfigure`. The downstream calls `lookup(upstream_name)` in its own reconfigure. If found, the downstream holds a direct Python (or Go) reference and calls the upstream's `do_command` as a normal method.
 
-**Evidence.** `viam_visuals/registry.py` and `visuals/registry.go`. Used by `src/visualizer.py` (registers in reconfigure, unregisters in close) and `src/driver.py` (lookup at reconfigure; fails fast if not found). The driver's `info` DoCommand reports `visualizer_type: "PlaygroundVisualizer"` (Python) / `"*exampleviz.playgroundVisualizer"` (Go) on success — the concrete class, not the framework's gRPC stub.
+**Evidence.** `viam_visuals.registry` (in [viam-labs/viam-viz-helpers-python](https://github.com/viam-labs/viam-viz-helpers-python)) and `visuals.registry` (in [viam-labs/viam-viz-helpers-go](https://github.com/viam-labs/viam-viz-helpers-go)). Used by `src/visualizer.py` (registers in reconfigure, unregisters in close) and `src/driver.py` (lookup at reconfigure; fails fast if not found). The driver's `info` DoCommand reports `visualizer_type: "PlaygroundVisualizer"` (Python) / `"*exampleviz.playgroundVisualizer"` (Go) on success — the concrete class, not the framework's gRPC stub.
 
 **Caveats.**
 - Only works in-process. A cross-module driver would need a fallback to the framework's gRPC stub.
@@ -635,7 +635,7 @@ For the Go side: `module.ModularMain` constructors are responsible for calling `
 - **Full item dict on UPDATED, not just the diff.** The visualizer needs the post-mutation item to rebuild the Transform proto. The `paths` field carries what *changed* so the renderer applies a narrow update; the item dict carries enough to rebuild the cached transform on the visualizer side.
 - **Namespace prefix for multi-driver setups.** Two drivers can push to one visualizer if they use different namespaces; labels are prefixed `<ns>/<label>` so they don't collide.
 
-**Evidence.** `viam_visuals/service.py::_apply_events` (Python) / `visuals/service.go::applyEvents` (Go). `tests/test_apply_events.py` covers happy path, mixed batches, namespacing, error cases.
+**Evidence.** `viam_visuals.service::_apply_events` (Python; library at [viam-labs/viam-viz-helpers-python](https://github.com/viam-labs/viam-viz-helpers-python)) / `visuals.service::applyEvents` (Go; library at [viam-labs/viam-viz-helpers-go](https://github.com/viam-labs/viam-viz-helpers-go)). `tests/test_apply_events.py` in the example module covers happy path, mixed batches, namespacing, error cases.
 
 **Wire pairing with `Scene`.** The driver builds events by calling `scene.add(...)` / `scene.update(...)` and gets back `SceneEvent` records; serializing them to the wire is one call: `events_to_wire(events)` / `EventsToWire(events)`. The driver never builds the wire dict by hand.
 
@@ -726,6 +726,74 @@ For larger repos consider a recursive glob or `find . -name '*.go'`. The Python 
 
 **Post-deploy verification.** After `make module.tar.gz`, md5 the local binary against the prior published binary in `~/.viam/packages/data/module/*-<old-version>-*/bin/`. Same md5 means the rebuild didn't actually happen. Two consecutive deploys with the same binary content is a sign of this bug.
 
+### bash-pipe-exit-code-masking
+
+**Symptom.** Shipped Go 0.0.43 expecting it to contain the recent composite-pointer fix and the new doc strings. After deploy, behavior matched 0.0.42 — none of the recent commits' content was in the binary. Registry confirmed 0.0.43 was uploaded; the tarball was the *previous* version's artifact under a new tag.
+
+**Root cause.** The release one-liner was
+
+```bash
+make module.tar.gz 2>&1 | tail -3 && viam module upload --version=$(cat VERSION) module.tar.gz
+```
+
+`make module.tar.gz` failed (stale Makefile dep list referencing the just-deleted `visuals/*.go`), but in bash the exit code of `cmd | pipe` is the exit code of the *last* stage. `tail -3` succeeded. The `&&` saw success, ran `viam module upload`, and shipped the stale tarball from a previous build under the new version number. Two consecutive registry versions had identical content.
+
+**Fix.** `set -o pipefail` at the start of any multi-step bash recipe so the pipeline's exit code reflects any failure, not just the last command's. Verified with `md5sum bin/<binary> ~/.viam/packages/data/module/*-<old>-*/bin/<binary>` — different hashes confirms the rebuild ran.
+
+```bash
+set -o pipefail
+make module.tar.gz 2>&1 | tail -3 && viam module upload ...
+```
+
+**Why it matters here.** Pipelines around `make` + `tail`/`grep`/`tee` are common in CI scripts and one-off release commands. Without `pipefail`, a build failure followed by a successful upload silently ships stale binaries — same symptom as the Makefile-dep trap above, different root cause, same masking.
+
+### composite-tovisuals-must-return-pointer-visuals (Go)
+
+**Symptom.** After the Go library's Scene-centric animation migration, the `trajectory_preview` line stayed centered at the origin instead of offset to its row, and the `spinning_frame` anchor never rotated. Other animations (Spin on direct `&visuals.Sphere{}`, Pulse on `&visuals.Box{}`) worked fine. Only entities created via composite `ToVisuals()` were affected.
+
+**Root cause.** Composite types in the Go library (`CoordinateFrame.ToVisuals`, `Line.ToVisuals`, `BoundingBox.ToVisuals`, `ArrowFromTo`) returned **value-typed** Visuals (`Capsule{...}`, `Sphere{...}`) rather than pointer-typed (`&Capsule{...}`, `&Sphere{...}`). The Scene stores them via the `Visual` interface either way. But `Animation.Apply`'s mutation dispatch and `offsetBaseItems`' offset application both type-switch on **pointer** types only:
+
+```go
+func setVisualPose(v Visual, p Pose) {
+    switch x := v.(type) {
+    case *Box:    x.Pose = p
+    case *Sphere: x.Pose = p
+    // value types Box, Sphere never match
+    }
+}
+```
+
+Value-typed Visuals fall through the switch silently. The animation ran every tick but never mutated anything; the offset helper ran at install but never shifted anything.
+
+**Evidence.** `visuals/composites.go` pre-fix returned `Capsule{...}` from `Line.ToVisuals`. After change to `&Capsule{...}`, both demos worked immediately. `recipes_test.go::TestDetectionsOverlay_OrbitCirclesOrigin` started failing because it had asserted `v.(visuals.Box)` (value form); had to flip to `v.(*visuals.Box)`. The test failure was the first signal that the value form was wrong everywhere.
+
+**Fix (Go library 0.0.37 / library doc commit).** All composite expansions return pointer-typed Visuals. `viam-viz-helpers-go::shapes.go` `Visual` interface doc now spells out the pointer convention explicitly: "Pass pointers to the Scene (`&visuals.Box{...}`, not `visuals.Box{...}`). The Scene stores the Visual interface but Animation.Apply mutates the underlying struct in place via type-switch on the concrete pointer type."
+
+**Why the Python sibling didn't hit this.** Python dataclasses are reference types by default (`viz.Box(...)` returns a reference; `viz.Box(...).pose = ...` mutates the object the Scene holds). The pointer-vs-value distinction is a Go-specific landmine.
+
+### force-vector-page-load-ghost-arrow
+
+**Symptom.** With the `force_vector_demo` preset loaded, the user reported "two force vectors on top of each other" after a page load — one continuing to animate (precessing, length/radius pulsing, hue cycling), the other frozen in whatever pose it had at the moment the page connected. The frozen arrow never updated until a page refresh, at which point one of the two animated and a fresh ghost replaced the previous frozen one.
+
+**Root cause.** `ForceVector.Apply` mutates the visual's `color` every tick (hue cycles continuously). `Scene.update` detects metadata changes and emits an UPDATED event with `paths=[]` — the **respawn signal** (see `renderer-honors-only-pose-and-physicalobject-on-updated`). The library translates that into REMOVE+ADD with a fresh `VersionedUUID` every tick at 30 Hz. The renderer race:
+
+1. Subscriber joins (page loads). Initial-burst delivers ADDED for the *current* UUID, say `force_vector_<t0>_N`.
+2. Next tick (33 ms later): subscriber receives REMOVE `force_vector_<t0>_N` + ADD `force_vector_<t0>_N+1`.
+3. The renderer creates the first arrow asynchronously (geometry construction is deferred); the REMOVE arrives before the first arrow's geometry is fully constructed, so the renderer drops the REMOVE for an entity it doesn't yet have. The ADD for `N+1` lands correctly and animates.
+4. The orphaned entity (`force_vector_<t0>_N`) finishes construction *after* the REMOVE was dropped — and stays in the renderer forever at the pose it had when the renderer started building it. Frozen ghost.
+
+**Confirmed empirically.** Visible at page-load only; not visible if the user lets the scene run for a while (the orphan was already constructed before the user looked). Two-arrow overlap precisely at the configured force_vector position.
+
+**Mitigations.**
+
+1. **Don't mutate color in `Apply`.** Pose/length/radius all update via UPDATED smoothly without metadata respawn. Drops color cycling visually but eliminates the bug class entirely. Matches the recipes.go convention (`ForceVectorRecipe.Tick` deliberately omits color cycling for this reason).
+2. **`snap_step` the hue.** Quantize to e.g. 6 hue steps per period → ~1.2 respawns/sec instead of 30. Slow enough the renderer reliably completes each respawn before the next one fires. Trade-off: color jumps in discrete steps.
+3. **BreathingShapes label-rotation pattern.** Keep N pre-spawned arrows at different hues, rotate which is visible. Smoother but heavier (more entities, more bookkeeping).
+
+The Go library (0.0.39) restored color cycling in `ForceVector.Apply` after considering the trade-offs — the bug visibility is a one-time page-load artifact, and the live animation is the demo's point. Filed against the renderer (see bug #13).
+
+**Filed:** bug #13. Until the renderer guarantees REMOVE-before-construct ordering, modules that mutate metadata at tick rate need to bound respawn frequency or accept page-load ghosts.
+
 ## Bugs to file with the viz team
 
 1. **Stale metadata schema in RDK fake.** `rdk/services/worldstatestore/fake/moving_geos_world.go` uses the obsolete `{color: {r,g,b}, opacity: 0.5}` shape that the viewer no longer reads. Both the metadata constants (lines 25-105) and any onboarding docs that reference the fake mislead module authors. Sync the fake to emit the `viamrobotics/visualization::draw.MetadataToStruct` schema, or delete the metadata from the fake and document that metadata is opt-in.
@@ -752,6 +820,8 @@ For larger repos consider a recursive glob or `find . -name '*.go'`. The Python 
 
 12. **No first-class line / curve geometry in the world-state-store channel.** The viewer supports lines (with width + dot size), arrows, points (with size!), 3D models, and NURBS curves natively — but as `drawv1.Shape` variants on the drawing-API channel, not as `commonpb.Geometry` variants. A world-state-store service can't emit any of them. Either expose them as additional `commonpb.Geometry` oneof variants, OR add a sibling service type (`rdk:service:drawing` or similar) that modules can implement alongside `world_state_store` to get access to the drawing channel. Today the only way for a world-state-store module to draw a line is to fake it with a thin capsule.
 
+13. **REMOVE-before-construct ordering is not guaranteed in the renderer.** When a metadata change triggers a tight REMOVE+ADD respawn (e.g. continuous color cycling at 30 Hz), the renderer can drop the REMOVE for an entity it hasn't finished constructing yet, leaving an orphaned static instance of the old UUID alongside the animated new one. Reproduces on page load with the `force_vector_demo` preset's `ForceVector` animation (cycles hue every tick → respawn every tick). Workarounds force modules to either drop metadata mutation entirely or bound respawn frequency via `snap_step`, both of which constrain animation expressiveness. The renderer should either delay REMOVE processing until the matching ADD's geometry is constructed, or process REMOVE+ADD pairs atomically. See LESSONS.md::force-vector-page-load-ghost-arrow.
+
 ## Features to request from the viz team
 
 1. **Confirm chained-frame composition.** Document whether the viewer composes through `pose_in_observer_frame.reference_frame = <another emitted Transform's reference_frame>` or only honors known machine-config frame names. Either path is fine; the silence is the issue.
@@ -770,19 +840,22 @@ For larger repos consider a recursive glob or `find . -name '*.go'`. The Python 
 
 8. **Point cloud render size knob is in the wrong channel.** The viewer has a per-point size control — `drawv1.Points.PointSize` (see `viamrobotics/visualization::draw/drawing.go::Shape.ToProto`). But that lives on the `drawv1.Shape` proto used by the drawing API, not on the `commonpb.PointCloud` proto used by world-state-store. So a world-state-store service has no way to set per-point size; it ships dense / radially-thickened point clouds as a workaround. Either expose a `point_size` field on `commonpb.PointCloud`, or let world-state-store services emit a `commonpb.Geometry` variant that carries a size hint.
 
-## Library plan
+## Library
 
-The accumulated gotchas in this doc all want to live in a reusable library. Decision (2026-05-12): **ViamVizHelpers, Python.** Originally sketched in Python, briefly retargeted as Go for proximity to `viamrobotics/visualization`, then back to Python — most module authors write Python today, this module is Python, and the existing prototype (`src/{geometries,animation,presets,service}.py`) is the working reference. A Go port is still on the table for the long-term upstream merge into `viamrobotics/visualization`, but Python ships sooner and helps actual users.
+Extracted (2026-05-19). The accumulated gotchas above all live in a reusable library now, in two language flavors:
 
-The full library design lives in `LIBRARY_PLAN.md` in this repo. That document is the source of truth for:
+- **Python:** [`viam-labs/viam-viz-helpers-python`](https://github.com/viam-labs/viam-viz-helpers-python). PyPI name `viam-viz-helpers`; import name `viam_visuals`. Apache-2.0.
+- **Go:** [`viam-labs/viam-viz-helpers-go`](https://github.com/viam-labs/viam-viz-helpers-go). Module path `github.com/viam-labs/viam-viz-helpers-go`, package `visuals`. Apache-2.0.
 
-- Package layout and import paths
-- Public API surface (Scene class, geometry constructors, animation classes, inheritable ServiceBase)
-- The delivery order and which gotchas each step resolves
-- Testing strategy
-- The migration path for this module (3425 → ~820 lines) and the upstream landing options
+This example module depends on both — `requirements.txt` and `go.mod` install from git on `@main`. Each library has its own `CLAUDE.md` documenting the architecture, the renderer quirks (a distilled subset of this file), the optional-interfaces hook surface, and cross-language parity expectations.
 
-The Python code in this repo IS the prototype the library is being extracted from. Anything the module does and was painful, the library should make trivial.
+`LIBRARY_PLAN.md` in this repo still exists as the historical design doc — useful context for the *why* behind the package layout, but the design itself is now realized. New work on the library happens in the extracted repos.
+
+What's still pre-1.0:
+
+- No tagged releases yet — `requirements.txt` / `go.mod` pin to `@main`. Tag a `v0.1.0` on each library once the API has settled from external consumers' feedback.
+- No PyPI / Go-proxy publication yet — install paths are git-only.
+- CI is in place (lint + test on push/PR for both repos); add release automation when version tagging starts.
 
 ## Tutorial outline (to be expanded)
 
